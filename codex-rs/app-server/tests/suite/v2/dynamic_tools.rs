@@ -481,14 +481,10 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
         other => panic!("expected DynamicToolCall request, got {other:?}"),
     };
 
-    assert!(
-        params
-            .cleanup_token
-            .as_ref()
-            .is_some_and(|token| !token.is_empty())
-    );
+    // Ordinary sessions do not receive owner-only cleanup capabilities.
+    assert!(params.cleanup_token.is_none());
     let expected = DynamicToolCallParams {
-        cleanup_token: params.cleanup_token.clone(),
+        cleanup_token: None,
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         call_id: call_id.to_string(),
@@ -680,14 +676,10 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
         other => panic!("expected DynamicToolCall request, got {other:?}"),
     };
 
-    assert!(
-        actual_params
-            .cleanup_token
-            .as_ref()
-            .is_some_and(|token| !token.is_empty())
-    );
+    // Ordinary sessions do not receive owner-only cleanup capabilities.
+    assert!(actual_params.cleanup_token.is_none());
     let params = DynamicToolCallParams {
-        cleanup_token: actual_params.cleanup_token.clone(),
+        cleanup_token: None,
         thread_id,
         turn_id,
         call_id: call_id.to_string(),
