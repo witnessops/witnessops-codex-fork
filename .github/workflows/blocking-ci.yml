@@ -8,45 +8,105 @@ on:
     branches: [main]
 
 jobs:
+  # WitnessOps PRs use bounded static checks; full validation stays blocked.
+  # The existing required gate rejects skipped families, so this is not full CI.
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Bazel
     uses: ./.github/workflows/bazel.yml
     secrets: inherit
 
   blob-size-policy:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Blob size policy
     uses: ./.github/workflows/blob-size-policy.yml
     secrets: inherit
 
   cargo-deny:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: cargo-deny
     uses: ./.github/workflows/cargo-deny.yml
     secrets: inherit
 
   codespell:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Codespell
     uses: ./.github/workflows/codespell.yml
     secrets: inherit
 
   repo-checks:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: repo-checks
     uses: ./.github/workflows/repo-checks.yml
     secrets: inherit
 
   rust-ci:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
     secrets: inherit
 
   sdk:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: sdk
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
+  witnessops-static:
+    name: WitnessOps lightweight source checks (not full CI)
+    if: ${{ github.repository == 'witnessops/witnessops-codex-fork' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: witnessops-static-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The PR merge commit and its two parents; no unbounded history fetch.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check source invariants (no compilation or test execution)
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info >= (3, 11)'
+          python3 .github/scripts/verify_cargo_workspace_manifests.py
+          python3 .github/scripts/verify_tui_core_boundary.py
+          python3 .github/scripts/verify_bazel_clippy_lints.py
+
+      - name: Check proposed diff and blob sizes
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          python3 scripts/check_blob_size.py \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --max-bytes 512000 \
+            --allowlist .github/blob-size-allowlist.txt
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
   required:
     name: CI required
+    timeout-minutes: 5
+    permissions:
+      contents: read
     # Without `always()`, GitHub skips this job after a failed dependency and a
     # required check can appear successful instead of reporting the failure.
     if: ${{ always() }}

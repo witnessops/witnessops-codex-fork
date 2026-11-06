@@ -3,7 +3,7 @@ name: v8-canary
 # Do not use trigger-level path filters here. This workflow is also called by
 # postmerge-ci, and GitHub cannot share a path filter between pull_request and
 # workflow_call. v8_canary_changes.py is the single source of truth instead;
-# unrelated events run only the cheap metadata job below.
+# unrelated admitted events run only the cheap metadata job below.
 on:
   workflow_call:
   pull_request: {}
@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   metadata:
+    # This inherited build profile is not authorized for WitnessOps PRs.
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     outputs:
       # Older revisions can contain a detector that does not emit this output.
@@ -72,8 +74,8 @@ jobs:
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
     needs: metadata
-    # Metadata always runs; only relevant changes pay for the large matrix.
-    if: ${{ needs.metadata.outputs.canary_required == 'true' }}
+    # On admitted events, only relevant changes pay for the large matrix.
+    if: ${{ (github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request') && needs.metadata.outputs.canary_required == 'true' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -293,7 +295,7 @@ jobs:
   build-windows-source:
     name: Build ptrcomp-sandbox ${{ matrix.target }} from source
     needs: metadata
-    if: ${{ needs.metadata.outputs.windows_source_required == 'true' }}
+    if: ${{ (github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request') && needs.metadata.outputs.windows_source_required == 'true' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
