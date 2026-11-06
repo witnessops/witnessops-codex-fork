@@ -74,3 +74,37 @@ async fn response_cancel_race_completes_once() {
         assert!(!matches!(event.msg, EventMsg::ItemCompleted(_)));
     }
 }
+
+#[tokio::test]
+async fn scoped_callback_response_preserves_replacement_and_accepts_recorded_origin() {
+    let (session, _, _) = crate::session::tests::make_session_and_context_with_rx().await;
+    let active = ActiveTurn::default();
+    let (tx, mut rx) = oneshot::channel();
+    active.turn_state.lock().await.insert_pending_dynamic_tool(
+        "reused".into(),
+        "new-origin".into(),
+        tx,
+    );
+    *session.active_turn.lock().await = Some(active);
+    let response = DynamicToolResponse {
+        content_items: Vec::new(),
+        success: true,
+    };
+    session
+        .notify_dynamic_tool_response_for_turn(Some("old-origin"), "reused", response.clone(), true)
+        .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    // No current task ID is needed: the pending call owns its original identity.
+    session
+        .notify_dynamic_tool_response_for_turn(
+            Some("new-origin"),
+            "reused",
+            response.clone(),
+            false,
+        )
+        .await;
+    assert_eq!(rx.await.unwrap(), response);
+}

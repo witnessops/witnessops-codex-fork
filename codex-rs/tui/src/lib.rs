@@ -586,6 +586,45 @@ async fn start_app_server(
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<AppServerClient> {
+    start_app_server_with_owner_mode(
+        target,
+        arg0_paths,
+        config,
+        cli_kv_overrides,
+        loader_overrides,
+        strict_config,
+        cloud_config_bundle,
+        feedback,
+        log_db,
+        state_db,
+        environment_manager,
+        embedded_network_policy,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_app_server_with_owner_mode(
+    target: &mut AppServerTarget,
+    arg0_paths: Arg0DispatchPaths,
+    config: Config,
+    cli_kv_overrides: Vec<(String, toml::Value)>,
+    loader_overrides: LoaderOverrides,
+    strict_config: bool,
+    cloud_config_bundle: CloudConfigBundleLoader,
+    feedback: codex_feedback::CodexFeedback,
+    log_db: Option<log_db::LogDbLayer>,
+    state_db: &mut Option<StateDbHandle>,
+    environment_manager: Arc<EnvironmentManager>,
+    embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
+    sovereign_read_head: bool,
+) -> color_eyre::Result<AppServerClient> {
+    if sovereign_read_head && matches!(target, AppServerTarget::LocalDaemon { .. }) {
+        color_eyre::eyre::bail!(
+            "--sovereign-read-head cannot attach to a shared background server"
+        );
+    }
     let connection = if matches!(target, AppServerTarget::Embedded) {
         None
     } else {
@@ -593,7 +632,19 @@ async fn start_app_server(
     };
     if let Some(connection) = connection {
         match connection {
-            Ok(app_server) => return Ok(app_server),
+            Ok(mut app_server) => {
+                if sovereign_read_head {
+                    app_server
+                        .enable_sovereign_read_head(config.cwd.to_path_buf())
+                        .await?;
+                } else if app_server.server_supports_sovereign_read_head() {
+                    let _ = app_server.shutdown().await;
+                    color_eyre::eyre::bail!(
+                        "owner-only app server requires explicit --sovereign-read-head"
+                    );
+                }
+                return Ok(app_server);
+            }
             Err(err)
                 if matches!(
                     target,
@@ -616,7 +667,8 @@ async fn start_app_server(
             Err(err) => return Err(err),
         }
     }
-    start_embedded_app_server(
+    let root = config.cwd.to_path_buf();
+    start_embedded_app_server_with(
         arg0_paths,
         config,
         cli_kv_overrides,
@@ -628,6 +680,13 @@ async fn start_app_server(
         state_db.clone(),
         environment_manager,
         embedded_network_policy,
+        move |args| async move {
+            if sovereign_read_head {
+                InProcessAppServerClient::start_sovereign_read_head(args, root).await
+            } else {
+                InProcessAppServerClient::start(args).await
+            }
+        },
     )
     .await
     .map(AppServerClient::InProcess)
@@ -1283,7 +1342,7 @@ async fn run_ratatui_app(
     let startup_app_server = startup_draft
         .run_until(
             &mut tui,
-            start_app_server(
+            start_app_server_with_owner_mode(
                 &mut app_server_target,
                 arg0_paths.clone(),
                 initial_config.clone(),
@@ -1296,6 +1355,7 @@ async fn run_ratatui_app(
                 &mut state_db,
                 environment_manager.clone(),
                 embedded_network_policy.clone(),
+                cli.sovereign_read_head,
             ),
         )
         .await;
@@ -1885,7 +1945,7 @@ async fn run_ratatui_app(
         None => match startup_draft
             .run_until(
                 &mut tui,
-                start_app_server(
+                start_app_server_with_owner_mode(
                     &mut app_server_target,
                     arg0_paths.clone(),
                     config.clone(),
@@ -1898,6 +1958,7 @@ async fn run_ratatui_app(
                     &mut state_db,
                     environment_manager.clone(),
                     embedded_network_policy.clone(),
+                    cli.sovereign_read_head,
                 ),
             )
             .await
@@ -2004,7 +2065,7 @@ async fn run_ratatui_app(
                 && matches!(app_server_target, AppServerTarget::Embedded)
             {
                 app_server.shutdown().await?;
-                let client = start_app_server(
+                let client = start_app_server_with_owner_mode(
                     &mut app_server_target,
                     arg0_paths.clone(),
                     config.clone(),
@@ -2017,6 +2078,7 @@ async fn run_ratatui_app(
                     &mut state_db,
                     environment_manager.clone(),
                     embedded_network_policy.clone(),
+                    cli.sovereign_read_head,
                 )
                 .await?;
                 app_server = AppServerSession::new(

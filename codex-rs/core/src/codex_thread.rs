@@ -240,6 +240,56 @@ impl CodexThread {
         }
     }
 
+    /// Whether the trusted host admitted this exact runtime to the strict callback lifecycle.
+    pub fn requires_dynamic_tool_cleanup(&self) -> bool {
+        self.session
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some()
+    }
+
+    /// Resolve callback cleanup without entering the submission queue.
+    pub async fn resolve_dynamic_tool_cleanup(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+        cleanup_complete: bool,
+    ) -> bool {
+        self.session
+            .dynamic_tool_cleanup
+            .resolve(Some(turn_id), call_id, cleanup_complete)
+            .await
+    }
+
+    /// Inspect cleanup without entering the submission queue blocked by an
+    /// interrupt. Some(true) means cancelling; None is not a cleanup receipt.
+    pub async fn dynamic_tool_cleanup_status(&self, turn_id: &str, call_id: &str) -> Option<bool> {
+        self.session
+            .dynamic_tool_cleanup
+            .status(turn_id, call_id)
+            .await
+    }
+
+    /// Deliver only to the originating turn, including while an interrupt is
+    /// awaiting cleanup. Never queue a cancelled reply for a replacement turn.
+    pub async fn respond_to_dynamic_tool_call(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+        response: codex_protocol::dynamic_tools::DynamicToolResponse,
+        cleanup_complete: bool,
+    ) {
+        self.session
+            .notify_dynamic_tool_response_for_turn(
+                Some(turn_id),
+                call_id,
+                response,
+                cleanup_complete,
+            )
+            .await;
+    }
+
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         self.io.submit(op).await
     }
@@ -307,6 +357,12 @@ impl CodexThread {
     /// Returns extension-owned data attached to this thread runtime.
     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
         &self.session.services.thread_extension_data
+    }
+
+    /// Returns the immutable tool ceiling captured when this thread started.
+    /// Unlike extension data, this is the policy used by tool planning and dispatch.
+    pub fn captured_tool_policy(&self) -> &codex_extension_api::ToolPolicy {
+        &self.session.tool_policy
     }
 
     /// Returns tools from this thread’s ready, unshared Apps MCP client.

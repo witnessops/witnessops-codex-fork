@@ -55,6 +55,22 @@ impl Session {
         next_config: Config,
         scope: RuntimeConfigRefresh,
     ) -> ConfigRefreshOutcome {
+        if self
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some()
+            && (next_config.model != expected_config.model
+                || next_config.cwd != expected_config.cwd
+                || next_config.explicit_permission_profile_mode
+                    != expected_config.explicit_permission_profile_mode
+                || next_config.permissions.active_permission_profile()
+                    != expected_config.permissions.active_permission_profile()
+                || next_config.permissions.effective_permission_profile()
+                    != expected_config.permissions.effective_permission_profile())
+        {
+            return ConfigRefreshOutcome::Rejected;
+        }
         let (mut config, mut outcome, rejection_kind) =
             match expected_config.resolve_runtime_refresh(&next_config, scope) {
                 Ok(config) => (config, ConfigRefreshOutcome::Published, None),

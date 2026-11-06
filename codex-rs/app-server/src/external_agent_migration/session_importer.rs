@@ -455,6 +455,7 @@ impl ExternalAgentSessionImporter {
         };
         let now = Utc::now();
         let create_params = CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,

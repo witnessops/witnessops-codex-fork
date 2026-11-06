@@ -294,6 +294,23 @@ pub enum PromptCacheKey {
     Omit,
 }
 
+pub(crate) fn ensure_owner_history_admitted(
+    history: &InitialHistory,
+    host_admitted: bool,
+) -> CodexResult<()> {
+    if !host_admitted
+        && history.scan_rollout_items(|item| {
+            matches!(item,
+        RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+        })
+    {
+        return Err(CodexErr::InvalidRequest(
+            "Sovereign owner history requires explicit host owner mode".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct StartThreadOptions {
     pub config: Config,
     /// Request-body cache key policy for this thread and its children. Hosts must reapply it on cold resume.
@@ -2351,6 +2368,12 @@ impl ThreadManagerState {
                 "thread store resume preparation requires a persisted resumed thread".to_string(),
             ));
         }
+        ensure_owner_history_admitted(
+            &initial_history,
+            thread_extension_init
+                .get::<codex_extension_api::SovereignReadHeadOwner>()
+                .is_some(),
+        )?;
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         // Older callers and saved reviewers identify isolation through their source.
@@ -3014,3 +3037,39 @@ fn append_interrupted_boundary(
 #[cfg(test)]
 #[path = "thread_manager_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod owner_history_tests {
+    use super::*;
+    use codex_history::ResumedHistory;
+    use codex_protocol::protocol::SessionMeta;
+    use codex_protocol::protocol::SessionMetaLine;
+
+    #[test]
+    fn persisted_owner_resume_and_fork_require_host_admission() {
+        let meta = SessionMeta {
+            sovereign_read_head: true,
+            ..Default::default()
+        };
+        let id = meta.id;
+        let items = vec![RolloutItem::SessionMeta(Box::new(SessionMetaLine {
+            meta,
+            git: None,
+        }))];
+        let histories = [
+            InitialHistory::Forked(items.clone()),
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: id,
+                history: Arc::new(items),
+                history_revision: None,
+                rollout_path: None,
+            }),
+        ];
+        for history in histories {
+            assert!(ensure_owner_history_admitted(&history, false).is_err());
+            assert!(ensure_owner_history_admitted(&history, true).is_ok());
+        }
+        assert!(ensure_owner_history_admitted(&InitialHistory::New, false).is_ok());
+        assert!(ensure_owner_history_admitted(&InitialHistory::Forked(Vec::new()), false).is_ok());
+    }
+}

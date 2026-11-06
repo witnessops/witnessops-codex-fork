@@ -353,6 +353,8 @@ pub(crate) struct AppServerSession {
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
     dynamic_tool_mcp: Option<Arc<DynamicToolMcpServer>>,
+    sovereign_callback:
+        Option<codex_app_server_client::sovereign_callback::SovereignCallbackSupervisor>,
     pub(crate) worktree_source_config_builder:
         Option<Box<crate::legacy_core::config::ConfigBuilder>>,
 }
@@ -503,6 +505,9 @@ impl AppServerSession {
         request_handle: AppServerRequestHandle,
         thread_params_mode: ThreadParamsMode,
     ) -> Self {
+        let sovereign_callback = connection_owner
+            .as_ref()
+            .and_then(AppServerClient::sovereign_callback_supervisor);
         Self {
             backend_id,
             connection_owner,
@@ -528,6 +533,7 @@ impl AppServerSession {
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
             dynamic_tool_mcp: None,
+            sovereign_callback,
             worktree_source_config_builder: None,
         }
     }
@@ -551,6 +557,7 @@ impl AppServerSession {
         view.thread_settings_update_supported = self.thread_settings_update_supported;
         view.default_model = self.default_model.clone();
         view.available_models = self.available_models.clone();
+        view.sovereign_callback = self.sovereign_callback.clone();
         view
     }
 
@@ -560,7 +567,7 @@ impl AppServerSession {
         app_event_tx: AppEventSender,
         status_updates: tokio::sync::broadcast::Sender<ThreadStatusChangedNotification>,
     ) -> std::io::Result<()> {
-        if self.thread_params_mode == ThreadParamsMode::Cloud {
+        if self.thread_params_mode == ThreadParamsMode::Cloud || self.sovereign_callback.is_some() {
             return Ok(());
         }
         let worktrees = if !self.uses_remote_workspace() && !config.active_project.is_untrusted() {
@@ -665,7 +672,9 @@ impl AppServerSession {
     }
 
     pub(crate) fn thread_tool_transport(&self) -> ThreadToolTransport {
-        if let Some(server) = self.dynamic_tool_mcp.as_ref() {
+        if let Some(supervisor) = self.sovereign_callback.as_ref() {
+            ThreadToolTransport::Sovereign(supervisor.clone())
+        } else if let Some(server) = self.dynamic_tool_mcp.as_ref() {
             ThreadToolTransport::Mcp(Arc::clone(server))
         } else {
             ThreadToolTransport::Dynamic
@@ -673,8 +682,12 @@ impl AppServerSession {
     }
 
     pub(crate) fn with_thread_tool_transport(mut self, transport: ThreadToolTransport) -> Self {
-        if let ThreadToolTransport::Mcp(server) = transport {
-            self.dynamic_tool_mcp = Some(server);
+        match transport {
+            ThreadToolTransport::Mcp(server) => self.dynamic_tool_mcp = Some(server),
+            ThreadToolTransport::Sovereign(supervisor) => {
+                self.sovereign_callback = Some(supervisor)
+            }
+            ThreadToolTransport::Dynamic => {}
         }
         self
     }
@@ -1256,6 +1269,8 @@ impl AppServerSession {
             params.approvals_reviewer = selected_profile.approvals_reviewer.map(Into::into);
             remove_permission_config_overrides(&mut params.config);
         }
+        self.thread_tool_transport()
+            .configure_permission_selection(&mut params.permissions, &mut params.sandbox);
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);
         let response: ThreadForkResponse = match self
@@ -2839,10 +2854,12 @@ mod tests {
     use crate::legacy_core::config::ConfigOverrides;
     use app_test_support::create_fake_paginated_rollout;
     use app_test_support::create_fake_rollout;
+    use codex_app_server_protocol::SandboxMode;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
+    use codex_config::LoaderOverrides;
     use codex_features::Feature;
     use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::config_types::ServiceTier;
@@ -2872,6 +2889,115 @@ mod tests {
             .build()
             .await
             .expect("config should build")
+    }
+
+    #[tokio::test]
+    async fn sovereign_native_owner_profile_survives_remote_param_projection() {
+        use crate::dynamic_tools_mcp::preserve_sovereign_permission_selection;
+        use crate::dynamic_tools_mcp::validate_sovereign_config;
+
+        let home = TempDir::new().expect("private config");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model = \"gpt-5.6-terra\"\ndefault_permissions = \"wops-codex-ops-read\"\n[permissions.wops-codex-ops-read]\nextends = \":read-only\"\n",
+        )
+        .expect("write fixture config");
+        let mut config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await
+            .expect("named owner config");
+        config.cwd = AbsolutePathBuf::from_absolute_path(
+            "/home/karol/WitnessOps/WitnessOps/repos/witnessops-codex-ops",
+        )
+        .expect("fixed absolute owner path");
+        validate_sovereign_config(&config).expect("exact owner scope");
+
+        let ordinary = thread_start_params_from_config(
+            &config,
+            ThreadParamsMode::Remote,
+            Some(config.cwd.as_path()),
+            None,
+        );
+        assert_eq!(ordinary.permissions, None);
+        assert_eq!(ordinary.sandbox, Some(SandboxMode::ReadOnly));
+        let mut owner = ordinary.clone();
+        preserve_sovereign_permission_selection(&mut owner.permissions, &mut owner.sandbox, true);
+        assert_eq!(owner.permissions.as_deref(), Some("wops-codex-ops-read"));
+        assert_eq!(owner.sandbox, None);
+        assert_eq!(owner.model, ordinary.model);
+        assert_eq!(owner.cwd, ordinary.cwd);
+
+        let thread_id = ThreadId::new();
+        let mut fork = thread_fork_params_from_config(
+            config.clone(),
+            thread_id,
+            ThreadParamsMode::Remote,
+            Some(config.cwd.as_path()),
+        );
+        assert_eq!(fork.sandbox, Some(SandboxMode::ReadOnly));
+        preserve_sovereign_permission_selection(&mut fork.permissions, &mut fork.sandbox, false);
+        assert_eq!(fork.permissions.as_deref(), Some("wops-codex-ops-read"));
+        assert_eq!(fork.sandbox, None);
+        for model_settings in [
+            ResumeModelSettings::RestoreFromThread,
+            ResumeModelSettings::PreserveExistingThread,
+        ] {
+            let mut resume = thread_resume_params_from_config(
+                config.clone(),
+                thread_id,
+                ThreadParamsMode::Remote,
+                Some(config.cwd.as_path()),
+                model_settings,
+                crate::resume_permissions::ResumePermissions::CURRENT_CONFIG,
+            );
+            preserve_sovereign_permission_selection(
+                &mut resume.permissions,
+                &mut resume.sandbox,
+                false,
+            );
+            assert_eq!(resume.permissions, None);
+            assert_eq!(resume.sandbox, None);
+        }
+        let mut explicit_resume = ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            sandbox: Some(SandboxMode::ReadOnly),
+            ..ThreadResumeParams::default()
+        };
+        preserve_sovereign_permission_selection(
+            &mut explicit_resume.permissions,
+            &mut explicit_resume.sandbox,
+            false,
+        );
+        assert_eq!(
+            explicit_resume.permissions.as_deref(),
+            Some("wops-codex-ops-read")
+        );
+        assert_eq!(explicit_resume.sandbox, None);
+
+        let mut wrong = config.clone();
+        wrong.model = Some("gpt-6-astra".to_string());
+        assert!(validate_sovereign_config(&wrong).is_err());
+        let mut wrong = config.clone();
+        wrong.cwd = AbsolutePathBuf::from_absolute_path(home.path()).expect("private path");
+        assert!(validate_sovereign_config(&wrong).is_err());
+        config.explicit_permission_profile_mode = false;
+        assert!(validate_sovereign_config(&config).is_err());
+    }
+
+    #[test]
+    fn sovereign_native_profile_propagation_never_rewrites_conflicting_selection() {
+        use crate::dynamic_tools_mcp::preserve_sovereign_permission_selection;
+        let mut permissions = Some(":danger-full-access".to_string());
+        let mut sandbox = None;
+        preserve_sovereign_permission_selection(&mut permissions, &mut sandbox, true);
+        assert_eq!(permissions.as_deref(), Some(":danger-full-access"));
+        let mut permissions = None;
+        let mut sandbox = Some(SandboxMode::DangerFullAccess);
+        preserve_sovereign_permission_selection(&mut permissions, &mut sandbox, true);
+        assert_eq!(permissions, None);
+        assert_eq!(sandbox, Some(SandboxMode::DangerFullAccess));
     }
 
     #[test]

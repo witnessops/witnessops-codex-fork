@@ -3367,6 +3367,9 @@ pub struct HistoryPosition {
 /// and should be used when there is no config override.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
+    /// Persisted restriction marker. This never grants host owner admission.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sovereign_read_head: bool,
     /// ChatGPT user that created this thread; absent when unavailable or for older threads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_user_id: Option<String>,
@@ -3450,6 +3453,7 @@ impl Default for SessionMeta {
     fn default() -> Self {
         let id = ThreadId::default();
         SessionMeta {
+            sovereign_read_head: false,
             creator_user_id: None,
             creator_account_id: None,
             session_id: id.into(),

@@ -887,3 +887,130 @@ fn test_invocation(
         },
     }
 }
+
+// SOVEREIGN_DISABLED_DISPATCH_BOUNDARY_V1 — actual registry dispatch, fake tools only.
+// Separate detached source; no model, network, app or device integration.
+struct SovereignAuditCounterHandler {
+    name: codex_tools::ToolName,
+    invoked: Arc<AtomicUsize>,
+}
+impl ToolExecutor<ToolInvocation> for SovereignAuditCounterHandler {
+    fn tool_name(&self) -> codex_tools::ToolName {
+        self.name.clone()
+    }
+    fn spec(&self) -> codex_tools::ToolSpec {
+        test_spec(&self.name)
+    }
+    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
+        self.invoked.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Ok(
+                Box::new(crate::tools::context::FunctionToolOutput::from_text(
+                    "SYNTHETIC_OWNER_AUDIT".to_string(),
+                    Some(true),
+                )) as Box<dyn crate::tools::context::ToolOutput>,
+            )
+        })
+    }
+}
+impl CoreToolRuntime for SovereignAuditCounterHandler {}
+
+#[tokio::test]
+async fn sovereign_owner_dispatch_denies_unregistered_native_mcp_apps_and_code_mode_calls()
+-> anyhow::Result<()> {
+    use crate::tools::context::ToolCallSource;
+    use codex_extension_api::ToolPolicy;
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let forbidden_calls = Arc::new(AtomicUsize::new(0));
+    let owner_calls = Arc::new(AtomicUsize::new(0));
+    let allowed_name = codex_tools::ToolName::namespaced("witnessops", "read_head");
+    let mut registry = ToolRegistry::with_tool_policy(Arc::new(ToolPolicy {
+        allowed_tools: Some(vec![
+            codex_tools::ToolName::plain("exec"),
+            codex_tools::ToolName::plain("wait"),
+            allowed_name.clone(),
+        ]),
+        require_managed_sandbox: true,
+        require_unified_exec: true,
+        require_code_mode_only: true,
+        expose_additional_permissions: false,
+    }));
+    registry.register_trusted(Arc::new(SovereignAuditCounterHandler {
+        name: allowed_name.clone(),
+        invoked: Arc::clone(&owner_calls),
+    }));
+    assert!(registry.registered_tool(&allowed_name).is_some());
+
+    // Two sources, direct and indirect Code Mode, must fail at actual
+    // ToolRegistry::dispatch_any_with_state rather than just tool advertisement.
+    let unadmitted = [
+        codex_tools::ToolName::plain("exec_command"),
+        codex_tools::ToolName::plain("shell_command"),
+        codex_tools::ToolName::plain("write_stdin"),
+        codex_tools::ToolName::plain("apply_patch"),
+        codex_tools::ToolName::plain("request_user_input"),
+        codex_tools::ToolName::plain("tool_search"),
+        codex_tools::ToolName::plain("web_search"),
+        codex_tools::ToolName::plain("update_plan"),
+        codex_tools::ToolName::plain("view_image"),
+        codex_tools::ToolName::plain("spawn_agent"),
+        codex_tools::ToolName::namespaced("collaboration", "spawn_agent"),
+        codex_tools::ToolName::namespaced("mcp__codex_apps__mail", "send"),
+        codex_tools::ToolName::namespaced("mcp__codex_apps__browser", "click"),
+        codex_tools::ToolName::namespaced("mcp__custom", "query"),
+        codex_tools::ToolName::namespaced("functions", "dynamic_echo"),
+        codex_tools::ToolName::plain("read_head"),
+        codex_tools::ToolName::namespaced("untrusted", "read_head"),
+    ];
+    for (i, name) in unadmitted.into_iter().enumerate() {
+        // A hostile source tries both normal trusted registration and external
+        // registration; the owner allowlist rejects either before dispatch.
+        let handler = Arc::new(SovereignAuditCounterHandler {
+            name: name.clone(),
+            invoked: Arc::clone(&forbidden_calls),
+        });
+        registry.register_trusted(Arc::clone(&handler) as Arc<dyn CoreToolRuntime>);
+        assert!(!registry.register_external(handler));
+        assert!(registry.registered_tool(&name).is_none(), "{name}");
+        for (from_code_mode, source_label) in [(false, "direct"), (true, "code-mode")] {
+            let mut invocation = test_invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                &format!("rejected-{i}-{source_label}"),
+                name.clone(),
+            );
+            if from_code_mode {
+                invocation.source = ToolCallSource::CodeMode {
+                    cell_id: format!("synthetic-cell-{i}"),
+                    runtime_tool_call_id: format!("synthetic-tool-{i}"),
+                };
+            }
+            let denied = registry.dispatch_any_with_state(invocation, None).await;
+            match denied {
+                Err(FunctionCallError::RespondToModel(message)) => {
+                    assert!(message.contains("unsupported"), "{name}: {message}");
+                }
+                Ok(_) => panic!("forbidden handler reached dispatch: {name}"),
+                Err(error) => panic!("unexpected reject kind for {name}: {error}"),
+            }
+        }
+    }
+    assert_eq!(forbidden_calls.load(Ordering::SeqCst), 0);
+
+    // Positive control: exact owner function can dispatch with the same
+    // Code Mode-origin metadata. This is a stub, not real git read_head.
+    let mut permitted = test_invocation(session, turn, "owner-approved", allowed_name.clone());
+    permitted.source = ToolCallSource::CodeMode {
+        cell_id: "synthetic-owner-cell".to_owned(),
+        runtime_tool_call_id: "synthetic-owner-call".to_owned(),
+    };
+    registry.dispatch_any_with_state(permitted, None).await?;
+    assert_eq!(owner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(forbidden_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}

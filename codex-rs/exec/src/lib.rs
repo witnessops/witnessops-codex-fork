@@ -224,6 +224,7 @@ impl RequestIdSequencer {
 
 struct ExecRunArgs {
     in_process_start_args: InProcessClientStartArgs,
+    sovereign_read_head: bool,
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
@@ -316,7 +317,22 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         cwd,
         mut add_dir,
         worktree,
+        sovereign_read_head,
     } = shared;
+
+    if sovereign_read_head
+        && (worktree
+            || oss
+            || oss_provider.is_some()
+            || !add_dir.is_empty()
+            || dangerously_bypass_approvals_and_sandbox
+            || is_workload_identity_selected()
+            || std::env::var_os("CODEX_EXEC_SERVER_URL").is_some())
+    {
+        anyhow::bail!(
+            "--sovereign-read-head requires the fixed local owner workspace and managed read-only profile"
+        );
+    }
 
     if worktree {
         if ignore_user_config {
@@ -759,6 +775,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
     run_exec_session(ExecRunArgs {
         in_process_start_args,
+        sovereign_read_head,
         state_db,
         command,
         config,
@@ -861,6 +878,7 @@ async fn load_bootstrap_config_or_exit(
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
         in_process_start_args,
+        sovereign_read_head,
         state_db,
         command,
         config,
@@ -1026,11 +1044,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
-    let mut client = InProcessAppServerClient::start(in_process_start_args)
+    let mut client = if sovereign_read_head {
+        InProcessAppServerClient::start_sovereign_read_head(
+            in_process_start_args,
+            config.cwd.to_path_buf(),
+        )
         .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
-        })?;
+    } else {
+        InProcessAppServerClient::start(in_process_start_args).await
+    }
+    .map_err(|err| anyhow::anyhow!("failed to initialize in-process app-server client: {err}"))?;
 
     let mut daybreak_enabled = config.daybreak_enabled;
     // Resolve resume and fork through existing app-server thread lifecycle APIs.

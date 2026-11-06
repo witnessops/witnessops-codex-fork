@@ -59,6 +59,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
     );
     store
         .create_thread(CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,

@@ -2176,6 +2176,8 @@ dependencies = [
 name = "codex-app-server-client"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "app_test_support",
  "codex-app-server",
  "codex-app-server-protocol",
  "codex-app-server-transport",
@@ -2188,7 +2190,9 @@ dependencies = [
  "codex-uds",
  "codex-utils-absolute-path",
  "codex-utils-rustls-provider",
+ "core_test_support",
  "futures",
+ "libc",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -2198,6 +2202,7 @@ dependencies = [
  "toml 0.9.11+spec-1.1.0",
  "tracing",
  "url",
+ "wiremock",
 ]
 
 [[package]]

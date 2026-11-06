@@ -242,7 +242,68 @@ pub(super) async fn build_test_processor(
     Arc<MessageProcessor>,
     mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
 ) {
+    build_test_processor_with_state_db(config, auth_manager, None).await
+}
+
+pub(super) async fn build_test_processor_with_state_db(
+    config: Arc<Config>,
+    auth_manager: Arc<AuthManager>,
+    state_db: Option<Arc<codex_state::StateRuntime>>,
+) -> (
+    Arc<MessageProcessor>,
+    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+) {
+    build_test_processor_with_state_db_and_code_mode(config, auth_manager, state_db, None).await
+}
+
+pub(super) async fn build_test_processor_with_state_db_and_code_mode(
+    config: Arc<Config>,
+    auth_manager: Arc<AuthManager>,
+    state_db: Option<Arc<codex_state::StateRuntime>>,
+    code_mode_session_provider: Option<Arc<dyn codex_code_mode::CodeModeSessionProvider>>,
+) -> (
+    Arc<MessageProcessor>,
+    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+) {
+    build_test_processor_with_state_db_code_mode_and_owner_mode(
+        config,
+        auth_manager,
+        state_db,
+        code_mode_session_provider,
+        crate::DynamicToolOwnerMode::Normal,
+    )
+    .await
+}
+
+pub(super) async fn build_test_processor_with_state_db_code_mode_and_owner_mode(
+    config: Arc<Config>,
+    auth_manager: Arc<AuthManager>,
+    state_db: Option<Arc<codex_state::StateRuntime>>,
+    code_mode_session_provider: Option<Arc<dyn codex_code_mode::CodeModeSessionProvider>>,
+    owner_mode: crate::DynamicToolOwnerMode,
+) -> (
+    Arc<MessageProcessor>,
+    mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+) {
     let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
+    // Filesystem-denial fixtures need the production sandboxed instruction reader.
+    // Ordinary tracing fixtures retain the previous helper-free environment.
+    let arg0_paths = Arg0DispatchPaths {
+        codex_self_exe: config.codex_self_exe.clone(),
+        codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
+        ..Default::default()
+    };
+    let environment_manager = if let Some(helper) = &arg0_paths.codex_self_exe {
+        assert!(helper.is_file(), "isolated filesystem helper missing");
+        let runtime = codex_exec_server::ExecServerRuntimeOptions::new(
+            helper.clone(),
+            arg0_paths.codex_linux_sandbox_exe.clone(),
+        )
+        .expect("absolute isolated runtime paths");
+        EnvironmentManager::create_for_tests_with_local(None, runtime).await
+    } else {
+        EnvironmentManager::default_for_tests()
+    };
     let config_manager = ConfigManager::new(
         config.codex_home.to_path_buf(),
         Vec::new(),
@@ -251,7 +312,7 @@ pub(super) async fn build_test_processor(
         ),
         /*strict_config*/ false,
         CloudConfigBundleLoader::default(),
-        Arg0DispatchPaths::default(),
+        arg0_paths.clone(),
         Arc::new(codex_config::NoopThreadConfigLoader),
     );
     let analytics_events_client =
@@ -260,31 +321,34 @@ pub(super) async fn build_test_processor(
         outgoing_tx,
         analytics_events_client.clone(),
     ));
-    let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-        cloud_skill_provider: None,
-        outgoing,
-        analytics_events_client,
-        arg0_paths: Arg0DispatchPaths::default(),
-        startup_cwd: Some(config.cwd.to_path_buf()),
-        config,
-        config_manager,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
-        feedback: CodexFeedback::new(),
-        log_db: None,
-        state_db: None,
-        config_warnings: Vec::new(),
-        startup_warnings_tx: mpsc::unbounded_channel().0,
-        session_source: SessionSource::VSCode,
-        user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
-            &auth_manager,
-        ))),
-        auth_manager,
-        installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
-        code_mode_session_provider: None,
-        rpc_transport: AppServerRpcTransport::Stdio,
-        remote_control_handle: None,
-        plugin_startup_tasks: Some(PluginStartupConfig::Current),
-    }));
+    let processor = Arc::new(MessageProcessor::new_with_owner_mode(
+        MessageProcessorArgs {
+            cloud_skill_provider: None,
+            outgoing,
+            analytics_events_client,
+            arg0_paths,
+            startup_cwd: Some(config.cwd.to_path_buf()),
+            config,
+            config_manager,
+            environment_manager: Arc::new(environment_manager),
+            feedback: CodexFeedback::new(),
+            log_db: None,
+            state_db,
+            config_warnings: Vec::new(),
+            startup_warnings_tx: mpsc::unbounded_channel().0,
+            session_source: SessionSource::VSCode,
+            user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+                &auth_manager,
+            ))),
+            auth_manager,
+            installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            code_mode_session_provider,
+            rpc_transport: AppServerRpcTransport::Stdio,
+            remote_control_handle: None,
+            plugin_startup_tasks: Some(PluginStartupConfig::Current),
+        },
+        owner_mode,
+    ));
     (processor, outgoing_rx)
 }
 

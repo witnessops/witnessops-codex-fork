@@ -131,6 +131,12 @@ export type { DynamicToolCallOutputContentItem } from "./DynamicToolCallOutputCo
 export type { DynamicToolCallParams } from "./DynamicToolCallParams";
 export type { DynamicToolCallResponse } from "./DynamicToolCallResponse";
 export type { DynamicToolCallStatus } from "./DynamicToolCallStatus";
+export type { DynamicToolCleanupAckParams } from "./DynamicToolCleanupAckParams";
+export type { DynamicToolCleanupAckResponse } from "./DynamicToolCleanupAckResponse";
+export type { DynamicToolCleanupIdentity } from "./DynamicToolCleanupIdentity";
+export type { DynamicToolCleanupReadParams } from "./DynamicToolCleanupReadParams";
+export type { DynamicToolCleanupReadResponse } from "./DynamicToolCleanupReadResponse";
+export type { DynamicToolCleanupStatus } from "./DynamicToolCleanupStatus";
 export type { DynamicToolFunctionSpec } from "./DynamicToolFunctionSpec";
 export type { DynamicToolNamespaceSpec } from "./DynamicToolNamespaceSpec";
 export type { DynamicToolNamespaceTool } from "./DynamicToolNamespaceTool";

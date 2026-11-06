@@ -8,6 +8,10 @@ use std::path::PathBuf;
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct SharedCliOptions {
+    /// Use the fixed Sovereign read-only callback mode for this session.
+    #[arg(long = "sovereign-read-head", default_value_t = false)]
+    pub sovereign_read_head: bool,
+
     /// Optional image(s) to attach to the initial prompt.
     #[arg(
         long = "image",
@@ -97,6 +101,7 @@ impl SharedCliOptions {
             || self.auto_review
             || self.dangerously_bypass_approvals_and_sandbox;
         let Self {
+            sovereign_read_head,
             images,
             model,
             oss,
@@ -111,6 +116,7 @@ impl SharedCliOptions {
             add_dir,
         } = self;
         let Self {
+            sovereign_read_head: root_sovereign_read_head,
             images: root_images,
             model: root_model,
             oss: root_oss,
@@ -125,6 +131,7 @@ impl SharedCliOptions {
             add_dir: root_add_dir,
         } = root;
 
+        *sovereign_read_head |= *root_sovereign_read_head;
         if model.is_none() {
             model.clone_from(root_model);
         }
@@ -167,6 +174,7 @@ impl SharedCliOptions {
             || subcommand.auto_review
             || subcommand.dangerously_bypass_approvals_and_sandbox;
         let Self {
+            sovereign_read_head,
             images,
             model,
             oss,
@@ -181,6 +189,7 @@ impl SharedCliOptions {
             add_dir,
         } = subcommand;
 
+        self.sovereign_read_head |= sovereign_read_head;
         if let Some(model) = model {
             self.model = Some(model);
         }

@@ -97,7 +97,7 @@ pub(crate) struct TurnState {
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
-    pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+    pending_dynamic_tools: HashMap<String, (String, oneshot::Sender<DynamicToolResponse>)>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
     pub(crate) tool_calls: u64,
@@ -290,16 +290,27 @@ impl TurnState {
     pub(crate) fn insert_pending_dynamic_tool(
         &mut self,
         key: String,
+        origin_turn_id: String,
         tx: oneshot::Sender<DynamicToolResponse>,
     ) -> Option<oneshot::Sender<DynamicToolResponse>> {
-        self.pending_dynamic_tools.insert(key, tx)
+        self.pending_dynamic_tools
+            .insert(key, (origin_turn_id, tx))
+            .map(|(_, tx)| tx)
     }
 
     pub(crate) fn remove_pending_dynamic_tool(
         &mut self,
         key: &str,
+        expected_turn_id: Option<&str>,
     ) -> Option<oneshot::Sender<DynamicToolResponse>> {
-        self.pending_dynamic_tools.remove(key)
+        if expected_turn_id.is_some_and(|expected| {
+            self.pending_dynamic_tools
+                .get(key)
+                .is_none_or(|(origin, _)| origin != expected)
+        }) {
+            return None;
+        }
+        self.pending_dynamic_tools.remove(key).map(|(_, tx)| tx)
     }
 
     pub(crate) fn accept_mailbox_delivery_for_current_turn(&mut self) {

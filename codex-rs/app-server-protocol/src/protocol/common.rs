@@ -500,6 +500,18 @@ enum GetAccountRateLimitsParamsTypeScript {
 }
 
 client_request_definitions! {
+    /// Read cleanup state without replaying a tool operation or entering its turn queue.
+    DynamicToolCleanupRead => "item/tool/cleanup/read" {
+        params: v2::DynamicToolCleanupReadParams,
+        serialization: None,
+        response: v2::DynamicToolCleanupReadResponse,
+    },
+    /// Idempotently deliver a verified cleanup result, including after reconnect.
+    DynamicToolCleanupAck => "item/tool/cleanup/ack" {
+        params: v2::DynamicToolCleanupAckParams,
+        serialization: None,
+        response: v2::DynamicToolCleanupAckResponse,
+    },
     Initialize => "initialize" {
         params: v1::InitializeParams,
         serialization: None,

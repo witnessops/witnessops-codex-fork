@@ -112,6 +112,7 @@ impl ManagedWorktreeTools {
             (text, success)
         };
         DynamicToolCallResponse {
+            cleanup_complete: false,
             content_items: vec![DynamicToolCallOutputContentItem::InputText { text }],
             success,
         }

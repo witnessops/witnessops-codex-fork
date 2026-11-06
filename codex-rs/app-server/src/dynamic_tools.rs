@@ -3,7 +3,6 @@ use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_core::CodexThread;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolResponse as CoreDynamicToolResponse;
-use codex_protocol::protocol::Op;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::error;
@@ -16,6 +15,7 @@ use crate::server_request_error::is_turn_transition_server_request_error;
 const INVALID_AUDIO_URL_ERROR: &str = "audio URLs must use an inline data URL";
 
 pub(crate) async fn on_call_response(
+    turn_id: String,
     call_id: String,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
@@ -37,6 +37,7 @@ pub(crate) async fn on_call_response(
     let DynamicToolCallResponse {
         content_items,
         success,
+        cleanup_complete,
     } = response.clone();
     let core_response = CoreDynamicToolResponse {
         content_items: content_items
@@ -45,18 +46,14 @@ pub(crate) async fn on_call_response(
             .collect(),
         success,
     };
-    if let Err(err) = conversation
-        .submit(Op::DynamicToolResponse {
-            id: call_id.clone(),
-            response: core_response,
-        })
-        .await
-    {
-        error!("failed to submit DynamicToolResponse: {err}");
-    }
+    conversation
+        .respond_to_dynamic_tool_call(&turn_id, &call_id, core_response, cleanup_complete)
+        .await;
 }
 
-fn decode_response(value: serde_json::Value) -> (DynamicToolCallResponse, Option<String>) {
+pub(crate) fn decode_response(
+    value: serde_json::Value,
+) -> (DynamicToolCallResponse, Option<String>) {
     match serde_json::from_value::<DynamicToolCallResponse>(value) {
         Ok(response)
             if response.content_items.iter().any(|item| {
@@ -101,6 +98,7 @@ fn decode_response(value: serde_json::Value) -> (DynamicToolCallResponse, Option
 fn fallback_response(message: &str) -> (DynamicToolCallResponse, Option<String>) {
     (
         DynamicToolCallResponse {
+            cleanup_complete: false,
             content_items: vec![DynamicToolCallOutputContentItem::InputText {
                 text: message.to_string(),
             }],
@@ -108,4 +106,28 @@ fn fallback_response(message: &str) -> (DynamicToolCallResponse, Option<String>)
         },
         Some(message.to_string()),
     )
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cleanup_ack_requires_a_valid_typed_response() {
+        for value in [
+            json!({"contentItems":[],"success":false}),
+            json!({"contentItems":[],"success":false,"cleanupComplete":false}),
+            json!({"contentItems":[],"success":false,"cleanupComplete":"true"}),
+            json!({"cleanupComplete":true}),
+            json!({"contentItems":[{"type":"inputImage","imageUrl":"https://example.invalid/image"}],"success":false,"cleanupComplete":true}),
+        ] {
+            let (response, _) = decode_response(value);
+            assert!(!response.cleanup_complete);
+        }
+        let (response, error) =
+            decode_response(json!({"contentItems":[],"success":false,"cleanupComplete":true}));
+        assert!(response.cleanup_complete);
+        assert!(error.is_none());
+    }
 }

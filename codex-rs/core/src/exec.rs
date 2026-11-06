@@ -539,7 +539,31 @@ async fn get_raw_output_result(
         .await;
     }
 
-    exec(params, network_sandbox_policy, stdout_stream, after_spawn).await
+    // Only the trusted, PID-isolated Linux helper understands this control pipe.
+    let sandbox_control = cfg!(target_os = "linux")
+        && sandbox == SandboxType::LinuxSeccomp
+        && !permission_profile
+            .to_runtime_permissions()
+            .0
+            .has_full_disk_write_access()
+        && !params
+            .command
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--inherit-pid-namespace" | "--use-legacy-landlock"
+                )
+            });
+    exec_with_sandbox_control(
+        params,
+        network_sandbox_policy,
+        stdout_stream,
+        after_spawn,
+        sandbox_control,
+    )
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -919,11 +943,29 @@ fn aggregate_output(
 /// Note this command does not apply any sandboxing logic. The caller is
 /// responsible for constructing [ExecParams::command] to include any sandboxing
 /// wrapper args, as appropriate.
+#[cfg(test)]
 async fn exec(
     params: ExecParams,
     network_sandbox_policy: NetworkSandboxPolicy,
     stdout_stream: Option<StdoutStream>,
     after_spawn: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<RawExecToolCallOutput> {
+    exec_with_sandbox_control(
+        params,
+        network_sandbox_policy,
+        stdout_stream,
+        after_spawn,
+        false,
+    )
+    .await
+}
+
+async fn exec_with_sandbox_control(
+    params: ExecParams,
+    network_sandbox_policy: NetworkSandboxPolicy,
+    stdout_stream: Option<StdoutStream>,
+    after_spawn: Option<Box<dyn FnOnce() + Send>>,
+    sandbox_control: bool,
 ) -> Result<RawExecToolCallOutput> {
     let ExecParams {
         command,
@@ -956,10 +998,14 @@ async fn exec(
             "command args are empty",
         ))
     })?;
+    let mut args = args.to_vec();
+    if sandbox_control {
+        args.insert(0, "--control-stdin".to_string());
+    }
     let arg0_ref = arg0.as_deref();
     let child = spawn_child_async(SpawnChildRequest {
         program: PathBuf::from(program),
-        args: args.into(),
+        args,
         arg0: arg0_ref,
         cwd,
         network_sandbox_policy,
@@ -967,7 +1013,11 @@ async fn exec(
         // apply_to_env_for_attempt above. Passing network here would reapply
         // non-attempt proxy vars and drop attempt correlation metadata.
         network: None,
-        stdio_policy: StdioPolicy::RedirectForShellTool,
+        stdio_policy: if sandbox_control {
+            StdioPolicy::RedirectForSandboxControl
+        } else {
+            StdioPolicy::RedirectForShellTool
+        },
         env,
     })
     .await?;
@@ -975,6 +1025,24 @@ async fn exec(
         after_spawn();
     }
     consume_output(child, expiration, capture_policy, stdout_stream).await
+}
+
+// Keep bubblewrap alive until it reaps namespace init. Killing its monitor first
+// would orphan init even if the kernel terminates the remaining namespace members.
+async fn close_sandbox_and_reap(
+    child: &mut Child,
+    control: &mut Option<tokio::process::ChildStdin>,
+) -> io::Result<()> {
+    drop(control.take());
+    tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Linux sandbox cleanup did not finish",
+            )
+        })??;
+    Ok(())
 }
 
 /// Consumes the output of a child process according to the configured capture
@@ -1022,6 +1090,7 @@ async fn consume_output(
         }
     };
     tokio::pin!(expiration_wait);
+    let mut sandbox_control = child.stdin.take();
     let process_group_id = child.id();
     let mut expiration_resolved = false;
     let (mut exit_status, mut timed_out) = tokio::select! {
@@ -1033,14 +1102,21 @@ async fn consume_output(
             expiration_resolved = true;
             match outcome {
                 Some(ExecExpirationOutcome::TimedOut) => {
-                    kill_child_process_group(&mut child)?;
-                    child.start_kill()?;
+                    if sandbox_control.is_some() {
+                        close_sandbox_and_reap(&mut child, &mut sandbox_control).await?;
+                    } else {
+                        kill_child_process_group(&mut child)?;
+                        child.start_kill()?;
+                    }
                     (
                         synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE),
                         true,
                     )
                 }
                 Some(ExecExpirationOutcome::Cancelled) => {
+                    if sandbox_control.is_some() {
+                        close_sandbox_and_reap(&mut child, &mut sandbox_control).await?;
+                    } else {
                     // Let TERM-aware processes run cleanup briefly, then kill any
                     // remaining members of the original process group.
                     let process_group_id = child.id();
@@ -1070,14 +1146,19 @@ async fn consume_output(
                             child.start_kill()?;
                         }
                     }
+                    }
                     (synthetic_exit_status_for_code(/*code*/ 1), false)
                 }
                 None => unreachable!("expiration wait only resolves while expiration is active"),
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            kill_child_process_group(&mut child)?;
-            child.start_kill()?;
+            if sandbox_control.is_some() {
+                close_sandbox_and_reap(&mut child, &mut sandbox_control).await?;
+            } else {
+                kill_child_process_group(&mut child)?;
+                child.start_kill()?;
+            }
             (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
         }
     };

@@ -3417,3 +3417,344 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
 #[path = "spec_plan_strict_third_party_tests.rs"]
 mod strict_third_party;
+
+// SOVEREIGN_DISABLED_MODEL_VISIBLE_PLAN_TESTS_V1 — compiled core-only tests.
+// No real provider, chat account, installed runtime or network.
+#[tokio::test]
+async fn sovereign_owner_allowlist_exposes_only_code_mode_wrappers() {
+    use codex_extension_api::ToolPolicy;
+    let (mut session, mut turn) = make_session_and_context().await;
+    set_features(
+        &mut turn,
+        &[
+            Feature::CodeMode,
+            Feature::CodeModeOnly,
+            Feature::ShellTool,
+            Feature::UnifiedExec,
+        ],
+    );
+    update_turn_settings_for_test(&mut turn, |settings| {
+        let model = Arc::make_mut(&mut settings.model_info);
+        model.tool_mode = Some(ToolMode::CodeModeOnly);
+        model.shell_type = ConfigShellToolType::UnifiedExec;
+        model.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        model.supports_search_tool = true;
+    });
+    set_web_search_mode(&mut turn, WebSearchMode::Live);
+    session.tool_policy = Arc::new(ToolPolicy {
+        allowed_tools: Some(vec![
+            ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
+            ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
+            ToolName::namespaced("witnessops", "read_head"),
+        ]),
+        require_managed_sandbox: true,
+        require_unified_exec: true,
+        require_code_mode_only: true,
+        expose_additional_permissions: false,
+    });
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let router = super::build_tool_router(
+        &session,
+        step.turn.as_ref(),
+        &step.settings.model_info,
+        &step.environments,
+        &step.mcp,
+        false,
+        &turn.extension_data,
+        None,
+        session.dynamic_tools().await.as_ref(),
+    )
+    .expect("construct restrictive model-visible router");
+    let plan = ToolPlanProbe::from_router(router);
+    assert_eq!(plan.tool_mode, ToolMode::CodeModeOnly);
+    assert_eq!(
+        plan.visible_names,
+        vec![
+            codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
+            codex_code_mode::WAIT_TOOL_NAME.to_string(),
+        ]
+    );
+    plan.assert_registered_lacks(&[
+        "exec_command",
+        "shell_command",
+        "apply_patch",
+        "request_user_input",
+        "web_search",
+        "tool_search",
+        "update_plan",
+    ]);
+    assert!(
+        plan.code_mode_tool_names.is_empty(),
+        "unapproved nested tools survived restricted construction"
+    );
+    assert!(!plan.can_manage_children);
+}
+
+#[tokio::test]
+async fn sovereign_owner_model_metadata_can_override_feature_only_code_mode_setting() {
+    use codex_extension_api::ToolPolicy;
+    let (mut session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).tool_mode = Some(ToolMode::Direct);
+    });
+    session.tool_policy = Arc::new(ToolPolicy {
+        allowed_tools: Some(vec![
+            ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
+            ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
+        ]),
+        ..Default::default()
+    });
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let router = super::build_tool_router(
+        &session,
+        step.turn.as_ref(),
+        &step.settings.model_info,
+        &step.environments,
+        &step.mcp,
+        false,
+        &turn.extension_data,
+        None,
+        session.dynamic_tools().await.as_ref(),
+    )
+    .expect("construct requested mode for synthetic counterexample");
+    let plan = ToolPlanProbe::from_router(router);
+    // Not an acceptance: a model-owned selector wins over configuration.
+    // The owner admission must fail closed on this mismatch in a later gate.
+    assert_eq!(plan.tool_mode, ToolMode::Direct);
+    plan.assert_visible_lacks(&[
+        codex_code_mode::PUBLIC_TOOL_NAME,
+        codex_code_mode::WAIT_TOOL_NAME,
+        "exec_command",
+        "apply_patch",
+    ]);
+}
+
+// SOVEREIGN_DISABLED_EFFECTIVE_MODE_GUARD_V1
+// Every case uses a synthetic model and a detached core router, never
+// provider traffic. The owner guard is checked before a plan is returned.
+#[tokio::test]
+async fn sovereign_owner_effective_mode_fail_closed_matrix() {
+    use codex_extension_api::ToolPolicy;
+    for (mode, available, should_pass, description) in [
+        (Some(ToolMode::Direct), true, false, "model-forced-direct"),
+        (Some(ToolMode::CodeMode), true, false, "model-forced-hybrid"),
+        (Some(ToolMode::CodeModeOnly), true, true, "available-only"),
+        (None, true, true, "feature-only-fallback"),
+        (
+            Some(ToolMode::CodeModeOnly),
+            false,
+            false,
+            "unavailable-host",
+        ),
+    ] {
+        let (mut session, mut turn) = make_session_and_context().await;
+        set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+        turn.code_mode_available = available;
+        update_turn_settings_for_test(&mut turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).tool_mode = mode;
+        });
+        session.tool_policy = Arc::new(ToolPolicy {
+            allowed_tools: Some(vec![
+                ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
+                ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
+                ToolName::namespaced("witnessops", "read_head"),
+            ]),
+            require_managed_sandbox: true,
+            require_unified_exec: true,
+            require_code_mode_only: true,
+            expose_additional_permissions: false,
+        });
+        let turn = Arc::new(turn);
+        let step = StepContext::for_test(Arc::clone(&turn));
+        let result = super::build_tool_router(
+            &session,
+            step.turn.as_ref(),
+            &step.settings.model_info,
+            &step.environments,
+            &step.mcp,
+            false,
+            &turn.extension_data,
+            None,
+            session.dynamic_tools().await.as_ref(),
+        );
+        match (should_pass, result) {
+            (true, Ok(router)) => {
+                let plan = ToolPlanProbe::from_router(router);
+                assert_eq!(plan.tool_mode, ToolMode::CodeModeOnly, "{description}");
+                assert_eq!(
+                    plan.visible_names,
+                    vec!["exec".to_owned(), "wait".to_owned()],
+                    "{description}"
+                );
+                assert!(plan.code_mode_tool_names.is_empty(), "{description}");
+            }
+            (false, Err(error)) => {
+                assert!(
+                    format!("{error}").contains("owner requires available effective CodeModeOnly"),
+                    "wrong rejection for {description}: {error}"
+                );
+            }
+            (true, Err(error)) => panic!("expected {description} to pass: {error}"),
+            (false, Ok(_)) => panic!("owner tool-plan bypass: {description}"),
+        }
+    }
+}
+
+// The owner ceiling must not accidentally change ordinary Codex turns.
+#[tokio::test]
+async fn sovereign_owner_effective_mode_requirement_is_opt_in() {
+    use codex_extension_api::ToolPolicy;
+    let (mut session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).tool_mode = Some(ToolMode::Direct);
+    });
+    session.tool_policy = Arc::new(ToolPolicy::default());
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let plan = ToolPlanProbe::from_router(
+        super::build_tool_router(
+            &session,
+            step.turn.as_ref(),
+            &step.settings.model_info,
+            &step.environments,
+            &step.mcp,
+            false,
+            &turn.extension_data,
+            None,
+            session.dynamic_tools().await.as_ref(),
+        )
+        .expect("ordinary Codex Direct mode should not be owner-gated"),
+    );
+    assert_eq!(plan.tool_mode, ToolMode::Direct);
+}
+
+// SOVEREIGN_DISABLED_MULTI_SOURCE_TOOL_INVENTORY_V1 — synthetic input only.
+// Actual core builder and registration filtering, no authenticated provider.
+#[tokio::test]
+async fn sovereign_owner_inventory_filters_fake_app_mcp_browser_dynamic_and_child_sources() {
+    use crate::tools::registry::ToolRegistry;
+    use codex_extension_api::ToolPolicy;
+    let (_, mut turn) = make_session_and_context().await;
+    set_features(
+        &mut turn,
+        &[
+            Feature::CodeMode,
+            Feature::CodeModeOnly,
+            Feature::ShellTool,
+            Feature::UnifiedExec,
+        ],
+    );
+    turn.multi_agent_version = MultiAgentVersion::V2;
+    set_web_search_mode(&mut turn, WebSearchMode::Live);
+    update_turn_settings_for_test(&mut turn, |settings| {
+        let model = Arc::make_mut(&mut settings.model_info);
+        model.tool_mode = Some(ToolMode::CodeModeOnly);
+        model.shell_type = ConfigShellToolType::UnifiedExec;
+        model.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        model.supports_search_tool = true;
+        model.use_responses_lite = false;
+    });
+    let permitted = ToolName::namespaced("witnessops", "read_head");
+    let mut registry = ToolRegistry::with_tool_policy(Arc::new(ToolPolicy {
+        allowed_tools: Some(vec![
+            ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
+            ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
+            permitted.clone(),
+        ]),
+        require_managed_sandbox: true,
+        require_unified_exec: true,
+        require_code_mode_only: true,
+        expose_additional_permissions: false,
+    }));
+
+    // Deliberately try to register sources that would be high consequence
+    // if they became visible or dispatchable. None is a live connector.
+    registry.add(crate::tools::handlers::PlanHandler);
+    let hosted = append_source_tools(
+        &turn,
+        turn.model_info(),
+        &mut registry,
+        vec![
+            mcp_runtime(
+                "fake-mail",
+                "mcp__codex_apps__mail",
+                "send",
+                ToolExposure::Direct,
+            ),
+            mcp_runtime(
+                "fake-browser",
+                "mcp__codex_apps__browser",
+                "click",
+                ToolExposure::Direct,
+            ),
+            mcp_runtime("fake-shell", "mcp__custom", "run", ToolExposure::Deferred),
+            mcp_runtime(
+                "fake-agent",
+                "collaboration",
+                "spawn_agent",
+                ToolExposure::Direct,
+            ),
+        ],
+        [Arc::new(DeferredExtensionTool)
+            as Arc<
+                dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>,
+            >],
+        &[
+            dynamic_tool(Some("witnessops"), "read_head", false),
+            dynamic_tool(None, "dynamic_echo", false),
+        ],
+    );
+    let router = ToolRouter::from_registry(
+        &turn,
+        turn.model_info(),
+        registry,
+        hosted,
+        &Default::default(),
+    );
+    assert_eq!(router.tool_mode(), ToolMode::CodeModeOnly);
+    let visible_specs = router.model_visible_specs();
+    let visible: Vec<_> = visible_specs.iter().map(ToolSpec::name).collect();
+    assert!(
+        visible.contains(&"exec") && visible.contains(&"wait"),
+        "{visible:?}"
+    );
+    assert!(
+        visible
+            .iter()
+            .all(|name| ["exec", "wait", "witnessops"].contains(name)),
+        "unapproved model-visible tool: {visible:?}",
+    );
+    assert!(router.registered_tool(&permitted).is_some());
+    assert!(router.exposes_tool(&permitted));
+
+    let denied = [
+        ToolName::plain("exec_command"),
+        ToolName::plain("write_stdin"),
+        ToolName::plain("apply_patch"),
+        ToolName::plain("update_plan"),
+        ToolName::plain("tool_search"),
+        ToolName::plain("web_search"),
+        ToolName::plain("dynamic_echo"),
+        ToolName::plain("spawn_agent"),
+        ToolName::namespaced("collaboration", "spawn_agent"),
+        ToolName::namespaced("mcp__codex_apps__mail", "send"),
+        ToolName::namespaced("mcp__codex_apps__browser", "click"),
+        ToolName::namespaced("mcp__custom", "run"),
+    ];
+    for name in denied {
+        assert!(router.registered_tool(&name).is_none(), "registered {name}");
+        assert!(!router.exposes_tool(&name), "exposed {name}");
+    }
+    assert!(!router.can_manage_children());
+    assert!(!router.has_terminal_controls());
+    assert!(
+        router
+            .code_mode_tool_names()
+            .values()
+            .all(|n| n == &permitted)
+    );
+}

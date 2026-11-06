@@ -382,7 +382,15 @@ impl InProcessClientHandle {
 /// This function sends `initialize` followed by `initialized` before returning
 /// the handle, so callers receive a ready-to-use runtime. If initialize fails,
 /// the runtime is shut down and an `InvalidData` error is returned.
-pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+pub async fn start(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    start_with_owner_mode(args, crate::DynamicToolOwnerMode::Normal).await
+}
+
+/// Starts with explicit host-owned callback admission, never inferred from config.
+pub async fn start_with_owner_mode(
+    mut args: InProcessStartArgs,
+    owner_mode: crate::DynamicToolOwnerMode,
+) -> IoResult<InProcessClientHandle> {
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
         let (path, range) = crate::exec_policy_warning_location(&err);
         args.config_warnings.push(ConfigWarningNotification {
@@ -393,7 +401,7 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
-    let client = Box::pin(start_uninitialized(args)).await?;
+    let client = Box::pin(start_uninitialized(args, owner_mode)).await?;
 
     let initialize_response = client
         .request(ClientRequest::Initialize {
@@ -432,7 +440,10 @@ async fn run_outbound_router(
     }
 }
 
-async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+async fn start_uninitialized(
+    mut args: InProcessStartArgs,
+    owner_mode: crate::DynamicToolOwnerMode,
+) -> IoResult<InProcessClientHandle> {
     let config_manager = ConfigManager::new(
         args.config.codex_home.to_path_buf(),
         args.cli_overrides,
@@ -508,31 +519,34 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
-            let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-                cloud_skill_provider: None,
-                outgoing: Arc::clone(&processor_outgoing),
-                analytics_events_client,
-                arg0_paths: args.arg0_paths,
-                config: args.config,
-                startup_cwd,
-                config_manager,
-                environment_manager: args.environment_manager,
-                feedback: args.feedback,
-                log_db: args.log_db,
-                state_db: args.state_db,
-                config_warnings: args.config_warnings,
-                startup_warnings_tx,
-                session_source: args.session_source,
-                user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
-                    &auth_manager,
-                ))),
-                auth_manager,
-                installation_id,
-                code_mode_session_provider: None,
-                rpc_transport: AppServerRpcTransport::InProcess,
-                remote_control_handle: None,
-                plugin_startup_tasks: Some(PluginStartupConfig::Current),
-            }));
+            let processor = Arc::new(MessageProcessor::new_with_owner_mode(
+                MessageProcessorArgs {
+                    cloud_skill_provider: None,
+                    outgoing: Arc::clone(&processor_outgoing),
+                    analytics_events_client,
+                    arg0_paths: args.arg0_paths,
+                    config: args.config,
+                    startup_cwd,
+                    config_manager,
+                    environment_manager: args.environment_manager,
+                    feedback: args.feedback,
+                    log_db: args.log_db,
+                    state_db: args.state_db,
+                    config_warnings: args.config_warnings,
+                    startup_warnings_tx,
+                    session_source: args.session_source,
+                    user_verification: Arc::new(crate::user_verification::Service::new(
+                        Arc::clone(&auth_manager),
+                    )),
+                    auth_manager,
+                    installation_id,
+                    code_mode_session_provider: None,
+                    rpc_transport: AppServerRpcTransport::InProcess,
+                    remote_control_handle: None,
+                    plugin_startup_tasks: Some(PluginStartupConfig::Current),
+                },
+                owner_mode,
+            ));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new(
                 crate::transport::ConnectionOrigin::InProcess,

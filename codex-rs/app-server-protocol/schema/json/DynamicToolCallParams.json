@@ -5,6 +5,13 @@
     "callId": {
       "type": "string"
     },
+    "cleanupToken": {
+      "description": "Private, per-callback cleanup capability. Never replay the tool to recover it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "namespace": {
       "type": [
         "string",

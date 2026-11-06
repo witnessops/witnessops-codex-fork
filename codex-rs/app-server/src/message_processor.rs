@@ -285,6 +285,13 @@ impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
     pub(crate) fn new(args: MessageProcessorArgs) -> Self {
+        Self::new_with_owner_mode(args, crate::DynamicToolOwnerMode::Normal)
+    }
+
+    pub(crate) fn new_with_owner_mode(
+        args: MessageProcessorArgs,
+        dynamic_tool_owner_mode: crate::DynamicToolOwnerMode,
+    ) -> Self {
         let MessageProcessorArgs {
             cloud_skill_provider,
             outgoing,
@@ -523,7 +530,7 @@ impl MessageProcessor {
             outgoing.clone(),
             Arc::clone(&thread_list_state_permit),
         );
-        let thread_processor = ThreadRequestProcessor::new(
+        let mut thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
             outgoing.clone(),
@@ -543,6 +550,7 @@ impl MessageProcessor {
             config_warnings.clone(),
             sample_responses,
         );
+        thread_processor.dynamic_tool_owner_mode = dynamic_tool_owner_mode;
         let turn_processor = TurnRequestProcessor::new(
             auth_manager,
             Arc::clone(&thread_manager),
@@ -578,7 +586,7 @@ impl MessageProcessor {
                     startup_warnings_tx,
                 );
         }
-        let initialize_processor = InitializeRequestProcessor::new(
+        let mut initialize_processor = InitializeRequestProcessor::new(
             gateway_login_control,
             outgoing.clone(),
             analytics_events_client.clone(),
@@ -586,6 +594,7 @@ impl MessageProcessor {
             rpc_transport,
             Arc::clone(&user_verification),
         );
+        initialize_processor.dynamic_tool_owner_mode = dynamic_tool_owner_mode;
         let external_agent_config_processor =
             ExternalAgentConfigRequestProcessor::new(ExternalAgentConfigRequestProcessorArgs {
                 outgoing: outgoing.clone(),
@@ -907,6 +916,10 @@ impl MessageProcessor {
         session_state: &ConnectionSessionState,
     ) {
         session_state.disconnect.cancel();
+        self.outgoing
+            .dynamic_tool_recovery
+            .mark_detached(connection_id)
+            .await;
         session_state.rpc_gate.close().await;
         self.account_processor
             .gateway_connection_closed(connection_id);
@@ -1176,6 +1189,103 @@ impl MessageProcessor {
                 .await;
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::DynamicToolCleanupRead { params, .. } => {
+                let snapshot = self
+                    .outgoing
+                    .dynamic_tool_recovery
+                    .lookup(&params.identity)
+                    .await
+                    .map_err(|_| invalid_params("unknown callback cleanup identity"))?;
+                let original = self
+                    .outgoing
+                    .dynamic_tool_recovery
+                    .pending_original(&params.identity)
+                    .await
+                    .map_err(|_| {
+                        invalid_params("original callback instance unavailable; recovery required")
+                    })?;
+                use codex_app_server_protocol::DynamicToolCleanupStatus as Status;
+                let status = match original {
+                    None => Status::Acknowledged,
+                    Some(_) if snapshot.owner_detached => Status::OwnerDetached,
+                    Some(thread) => {
+                        if thread
+                            .dynamic_tool_cleanup_status(
+                                &params.identity.turn_id,
+                                &params.identity.call_id,
+                            )
+                            .await
+                            == Some(true)
+                        {
+                            Status::Cancelling
+                        } else {
+                            Status::Running
+                        }
+                    }
+                };
+                Ok(Some(
+                    codex_app_server_protocol::DynamicToolCleanupReadResponse { status }.into(),
+                ))
+            }
+            ClientRequest::DynamicToolCleanupAck { params, .. } => {
+                let result = serde_json::to_value(&params.response)
+                    .map_err(|_| invalid_params("invalid callback cleanup result"))?;
+                if !params.response.cleanup_complete
+                    || crate::dynamic_tools::decode_response(result.clone())
+                        .1
+                        .is_some()
+                {
+                    return Err(invalid_params("explicit verified cleanup is required"));
+                }
+                let original = self
+                    .outgoing
+                    .dynamic_tool_recovery
+                    .pending_original(&params.identity)
+                    .await
+                    .map_err(|_| {
+                        invalid_params(
+                            "original callback instance unavailable or unknown; recovery required",
+                        )
+                    })?;
+                let already_acknowledged = if let Some(thread) = original {
+                    // This pinned original core instance can be waiting on the per-turn queue.
+                    // Delivery must bypass that queue and retain the owned teardown until cleanup.
+                    thread
+                        .respond_to_dynamic_tool_call(
+                            &params.identity.turn_id,
+                            &params.identity.call_id,
+                            codex_protocol::dynamic_tools::DynamicToolResponse {
+                                content_items: params
+                                    .response
+                                    .content_items
+                                    .into_iter()
+                                    .map(Into::into)
+                                    .collect(),
+                                success: params.response.success,
+                            },
+                            true,
+                        )
+                        .await;
+                    let already = self
+                        .outgoing
+                        .dynamic_tool_recovery
+                        .acknowledge(&params.identity)
+                        .await
+                        .map_err(|_| invalid_params("unknown callback cleanup identity"))?;
+                    self.outgoing
+                        .settle_recovered_dynamic_callback(&params.identity, result)
+                        .await;
+                    already
+                } else {
+                    true
+                };
+                Ok(Some(
+                    codex_app_server_protocol::DynamicToolCleanupAckResponse {
+                        already_acknowledged,
+                    }
+                    .into(),
+                ))
+            }
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)
@@ -2016,3 +2126,7 @@ mod thread_lifecycle_tests;
 #[cfg(test)]
 #[path = "message_processor_workspace_routing_tests.rs"]
 mod workspace_routing_tests;
+
+#[cfg(test)]
+#[path = "sovereign_warm_resume_tests.rs"]
+mod sovereign_warm_resume_tests;

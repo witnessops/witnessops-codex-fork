@@ -1890,6 +1890,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                 result: Box::new(
                     codex_app_server_protocol::ClientResponsePayload::Initialize(
                         codex_app_server_protocol::InitializeResponse {
+                            sovereign_read_head: false,
                             user_agent: "codex-test-agent".to_string(),
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),

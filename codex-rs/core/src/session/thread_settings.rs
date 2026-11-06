@@ -26,6 +26,16 @@ impl Session {
         &self,
         tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
     ) -> CodexResult<()> {
+        if self
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some()
+        {
+            return Err(CodexErr::UnsupportedOperation(
+                "Sovereign owner tools are fixed by the host".into(),
+            ));
+        }
         let _settings_guard = acquire_persistence_lock(self).await;
         if let Some(live_thread) = self.live_thread() {
             let config = self.get_config().await;

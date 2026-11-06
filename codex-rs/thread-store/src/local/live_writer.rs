@@ -107,7 +107,10 @@ pub(super) async fn resume_thread(
             message: format!("thread {} is archived", params.thread_id),
         });
     }
-    let history = match params.history {
+    let canonical_meta = codex_rollout::read_session_meta_line(&rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    let mut history = match params.history {
         Some(history)
             if !matches!(
                 history.first(),
@@ -129,6 +132,14 @@ pub(super) async fn resume_thread(
                 .items,
         ),
     };
+    if canonical_meta.meta.sovereign_read_head
+        && !history.iter().any(|item| {
+            matches!(item,
+            RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+        })
+    {
+        Arc::make_mut(&mut history).insert(0, RolloutItem::SessionMeta(Box::new(canonical_meta)));
+    }
     let history_mode = canonical_history_mode_from_rollout_items(&history);
     let cwd = params
         .metadata

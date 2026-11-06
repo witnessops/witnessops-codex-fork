@@ -1760,10 +1760,14 @@ pub struct FileChangeRequestApprovalResponse {
     pub decision: FileChangeApprovalDecision,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct DynamicToolCallParams {
+    /// Private, per-callback cleanup capability. Never replay the tool to recover it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cleanup_token: Option<String>,
     pub thread_id: String,
     pub turn_id: String,
     pub call_id: String,
@@ -1778,6 +1782,80 @@ pub struct DynamicToolCallParams {
 pub struct DynamicToolCallResponse {
     pub content_items: Vec<DynamicToolCallOutputContentItem>,
     pub success: bool,
+    /// After cancellation, true acknowledges that all callback effects and child
+    /// processes have stopped and cleanup/reaping has completed. Missing/false,
+    /// malformed responses and transport errors do not release turn teardown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_complete: bool,
+}
+
+impl std::fmt::Debug for DynamicToolCallParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicToolCallParams")
+            .field("thread_id", &self.thread_id)
+            .field("turn_id", &self.turn_id)
+            .field("call_id", &self.call_id)
+            .field("tool", &self.tool)
+            .field("cleanup_token", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DynamicToolCleanupIdentity {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub call_id: String,
+    pub request_id: crate::RequestId,
+    pub capability: String,
+}
+impl std::fmt::Debug for DynamicToolCleanupIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicToolCleanupIdentity")
+            .field("thread_id", &self.thread_id)
+            .field("turn_id", &self.turn_id)
+            .field("call_id", &self.call_id)
+            .field("request_id", &self.request_id)
+            .field("capability", &"[redacted]")
+            .finish()
+    }
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DynamicToolCleanupReadParams {
+    pub identity: DynamicToolCleanupIdentity,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DynamicToolCleanupAckParams {
+    pub identity: DynamicToolCleanupIdentity,
+    /// Original result, retained by the owner after verified cleanup. This RPC never executes work.
+    pub response: DynamicToolCallResponse,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum DynamicToolCleanupStatus {
+    Running,
+    Cancelling,
+    OwnerDetached,
+    Acknowledged,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DynamicToolCleanupReadResponse {
+    pub status: DynamicToolCleanupStatus,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DynamicToolCleanupAckResponse {
+    pub already_acknowledged: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

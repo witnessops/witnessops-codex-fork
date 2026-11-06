@@ -87,6 +87,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database";
 
+/// Per-instance callback identity retention, including accepted cleanup receipts.
+/// Owners can use the same bound without exhausting their admission before the server.
+pub const DYNAMIC_TOOL_RECOVERY_RECORD_LIMIT: usize = 16_384;
+
 fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool {
     err.get_ref().is_some_and(
         <dyn std::error::Error + Send + Sync + 'static>::is::<
@@ -115,6 +119,7 @@ mod connection_cleanup;
 mod connection_rpc_gate;
 mod current_time;
 mod daemon_thread_recovery;
+mod dynamic_tool_recovery;
 mod dynamic_tools;
 mod effective_plugin_change;
 mod error_code;
@@ -481,8 +486,17 @@ pub enum PluginStartupTasks {
     Skip,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DynamicToolOwnerMode {
+    #[default]
+    Normal,
+    SovereignReadHead,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
+    /// Immutable host admission; project configuration and RPCs cannot enable it.
+    pub dynamic_tool_owner_mode: DynamicToolOwnerMode,
     /// Optional host-owned frozen cloud skill catalog and resources, loaded once at startup.
     pub cloud_skills_snapshot: Option<std::path::PathBuf>,
     pub code_mode_host_transport: CodeModeHostTransport,
@@ -495,6 +509,7 @@ pub struct AppServerRuntimeOptions {
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
+            dynamic_tool_owner_mode: DynamicToolOwnerMode::Normal,
             cloud_skills_snapshot: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
@@ -1006,35 +1021,38 @@ pub async fn run_main_with_transport_options(
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
         let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
-        let mut processor = MessageProcessor::new(MessageProcessorArgs {
-            cloud_skill_provider,
-            outgoing: outgoing_message_sender,
-            analytics_events_client,
-            arg0_paths,
-            config: Arc::new(config),
-            startup_cwd,
-            config_manager,
-            environment_manager,
-            feedback: feedback.clone(),
-            log_db,
-            state_db: state_db.clone(),
-            config_warnings,
-            startup_warnings_tx,
-            session_source,
-            user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
-                &auth_manager,
-            ))),
-            auth_manager,
-            installation_id,
-            code_mode_session_provider,
-            rpc_transport: analytics_rpc_transport(&transport),
-            remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: matches!(
-                runtime_options.plugin_startup_tasks,
-                PluginStartupTasks::Start
-            )
-            .then_some(plugin_startup_config),
-        });
+        let mut processor = MessageProcessor::new_with_owner_mode(
+            MessageProcessorArgs {
+                cloud_skill_provider,
+                outgoing: outgoing_message_sender,
+                analytics_events_client,
+                arg0_paths,
+                config: Arc::new(config),
+                startup_cwd,
+                config_manager,
+                environment_manager,
+                feedback: feedback.clone(),
+                log_db,
+                state_db: state_db.clone(),
+                config_warnings,
+                startup_warnings_tx,
+                session_source,
+                user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+                    &auth_manager,
+                ))),
+                auth_manager,
+                installation_id,
+                code_mode_session_provider,
+                rpc_transport: analytics_rpc_transport(&transport),
+                remote_control_handle: Some(remote_control_handle.clone()),
+                plugin_startup_tasks: matches!(
+                    runtime_options.plugin_startup_tasks,
+                    PluginStartupTasks::Start
+                )
+                .then_some(plugin_startup_config),
+            },
+            runtime_options.dynamic_tool_owner_mode,
+        );
         processor.remote_control_processor.daemon_settings_file = daemon_settings_file;
         let processor = Arc::new(processor);
         let mut thread_created_rx = processor.thread_created_receiver();

@@ -269,6 +269,21 @@ impl Session {
         let Some((turn_context, task_done, current)) = target else {
             return TurnSettingsUpdateOutcome::TargetUnavailable;
         };
+        if self
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some()
+            && (update.environments.is_some()
+                || update
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model != current.selected_collaboration_mode().model()))
+        {
+            return TurnSettingsUpdateOutcome::Rejected {
+                reason: "Sovereign owner model and environments are fixed by the host".into(),
+            };
+        }
         let TurnSettingsUpdate {
             approvals_reviewer,
             environments: environment_requests,

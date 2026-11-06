@@ -967,14 +967,18 @@ impl Session {
         error: Option<ErrorEvent>,
     ) {
         let sub_id = task.turn_context.sub_id.clone();
-        if task.cancellation_token.is_cancelled() {
-            self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
-                .await;
-            return;
-        }
-
         trace!(task_kind = ?task.kind, sub_id, "aborting running task");
-        task.cancellation_token.cancel();
+        // Callback owners must finish cleanup before any destructive task/cell
+        // teardown. Their acknowledgements bypass the blocked submission queue.
+        let interrupt_all_cells = reason == TurnAbortReason::Interrupted
+            && task
+                .turn_context
+                .config
+                .features
+                .enabled(Feature::CodeModeInterrupt);
+        self.dynamic_tool_cleanup
+            .cancel_turn_and_wait(&sub_id, &task.cancellation_token, interrupt_all_cells)
+            .await;
         if reason == TurnAbortReason::Interrupted
             && task
                 .turn_context

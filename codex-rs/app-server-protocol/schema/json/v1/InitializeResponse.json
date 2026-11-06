@@ -23,6 +23,10 @@
       "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
       "type": "string"
     },
+    "sovereignReadHead": {
+      "description": "True only when the host explicitly started the fixed Sovereign read-head owner mode.",
+      "type": "boolean"
+    },
     "userAgent": {
       "type": "string"
     }

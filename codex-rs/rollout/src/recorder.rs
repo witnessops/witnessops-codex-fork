@@ -93,6 +93,7 @@ pub struct RolloutRecorder {
 #[allow(clippy::large_enum_variant)]
 pub enum RolloutRecorderParams {
     Create {
+        sovereign_read_head: bool,
         session_id: SessionId,
         conversation_id: ThreadId,
         /// Overrides the rollout ID encoded in the filename.
@@ -220,6 +221,7 @@ impl RolloutRecorderParams {
         dynamic_tools: Vec<DynamicToolSpec>,
     ) -> Self {
         Self::Create {
+            sovereign_read_head: false,
             session_id: conversation_id.into(),
             conversation_id,
             rollout_id_override: None,
@@ -242,6 +244,18 @@ impl RolloutRecorderParams {
             subagent_history_start_ordinal: None,
             initial_window_id: None,
         }
+    }
+
+    /// Persist a host restriction without treating saved data as admission.
+    pub fn with_sovereign_read_head(mut self, enabled: bool) -> Self {
+        if let Self::Create {
+            sovereign_read_head,
+            ..
+        } = &mut self
+        {
+            *sovereign_read_head = enabled;
+        }
+        self
     }
 
     /// Record the authenticated identity at thread creation, or preserve it on revert.
@@ -927,6 +941,7 @@ impl RolloutRecorder {
         let cwd = config.cwd().to_path_buf();
         let state = match params {
             RolloutRecorderParams::Create {
+                sovereign_read_head,
                 session_id,
                 conversation_id,
                 rollout_id_override,
@@ -963,6 +978,7 @@ impl RolloutRecorder {
                     .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
 
                 let session_meta = SessionMeta {
+                    sovereign_read_head,
                     session_id,
                     id: conversation_id,
                     forked_from_id,

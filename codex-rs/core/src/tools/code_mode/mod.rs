@@ -579,3 +579,52 @@ mod tests {
         );
     }
 }
+
+/// Cross-crate test bridge: exercise the production nested callback broker with
+/// a prepared real step, without creating a V8 cell or invoking a model.
+/// The caller supplies only benign, expected-to-be-refused fixture requests.
+pub(crate) async fn sovereign_nested_dispatch_for_test(
+    session: Arc<Session>,
+    step_context: Arc<StepContext>,
+    invocations: Vec<CodeModeNestedToolCall>,
+) -> Vec<Result<JsonValue, String>> {
+    use codex_code_mode::CodeModeSessionDelegate;
+
+    let broker = Arc::new(CodeModeDispatchBroker::new(
+        session.thread_id,
+        session.services.executed_tool_calls.clone(),
+    ));
+    let delegate = CodeModeCellDelegate {
+        broker: Arc::clone(&broker),
+        step_context: Arc::clone(&step_context),
+    };
+    let worker = broker.start_turn_worker(
+        session,
+        step_context,
+        Arc::new(tokio::sync::Mutex::new(
+            crate::turn_diff_tracker::TurnDiffTracker::new(),
+        )),
+    );
+    let mut results = Vec::new();
+    for invocation in invocations {
+        let cell_id = invocation.cell_id.clone();
+        broker.mark_cell_ready_for_dispatch(&cell_id, None);
+        let token = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            delegate.invoke_tool(invocation, token.clone()),
+        )
+        .await;
+        results.push(match result {
+            Ok(result) => result,
+            Err(_) => {
+                token.cancel();
+                Err("TEST FAILURE: nested dispatch timed out".to_string())
+            }
+        });
+        broker.close_cell(&cell_id);
+    }
+    drop(worker);
+    tokio::task::yield_now().await;
+    results
+}

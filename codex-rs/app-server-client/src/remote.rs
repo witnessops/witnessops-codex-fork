@@ -18,12 +18,15 @@ use std::io::Result as IoResult;
 use std::time::Duration;
 
 use crate::AppServerEvent;
+use crate::AppServerRequestHandle;
 use crate::RequestResult;
 use crate::SHUTDOWN_TIMEOUT;
+use crate::SovereignCallbackSupervisor;
 use crate::TypedRequestError;
 use crate::decode_typed_response;
 use crate::remote_websocket::RemoteWebSocket;
 use crate::remote_websocket::WebSocketHandshake;
+use crate::sovereign_supervisor;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -45,6 +48,8 @@ use codex_uds::UnixStream;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use serde::de::DeserializeOwned;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
@@ -157,6 +162,7 @@ enum RemoteClientCommand {
 
 #[derive(Default)]
 struct RemoteServerMetadata {
+    sovereign_read_head: bool,
     server_version: Option<String>,
     codex_home: Option<String>,
     platform_family: Option<String>,
@@ -164,6 +170,8 @@ struct RemoteServerMetadata {
 }
 
 pub struct RemoteAppServerClient {
+    sovereign: sovereign_supervisor::SovereignSlot,
+    endpoint_identity: String,
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
     pending_events: VecDeque<AppServerEvent>,
@@ -262,9 +270,15 @@ impl RemoteAppServerClient {
 
         let (command_tx, mut command_rx) = mpsc::channel::<RemoteClientCommand>(channel_capacity);
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
+        let sovereign = sovereign_supervisor::slot();
+        let owner_slot = Arc::downgrade(&sovereign);
+        let endpoint_identity = endpoint.clone();
         let worker_handle = tokio::spawn(async move {
             let mut pending_requests =
                 HashMap::<RequestId, oneshot::Sender<IoResult<RequestResult>>>::new();
+            let mut pending_methods = HashMap::<RequestId, String>::new();
+            let mut pending_execution =
+                HashMap::<RequestId, sovereign_supervisor::ExecutionLease>::new();
             let mut worker_exit_error: Option<(ErrorKind, String)> = None;
             loop {
                 tokio::select! {
@@ -275,6 +289,13 @@ impl RemoteAppServerClient {
                         };
                         match command {
                             RemoteClientCommand::Request { request, response_tx } => {
+                                let owner = sovereign_supervisor::get(&owner_slot);
+                                let execution = owner.as_ref().and_then(|owner| owner.begin_execution(&request.method, request.params.as_ref()));
+                                if let Some(owner) = &owner
+                                    && let Err(error) = owner.check_method(&request.method, request.params.as_ref()) {
+                                    let _ = response_tx.send(Err(error));
+                                    continue;
+                                }
                                 let request_id = request.id.clone();
                                 if pending_requests.contains_key(&request_id) {
                                     let _ = response_tx.send(Err(IoError::new(
@@ -283,6 +304,8 @@ impl RemoteAppServerClient {
                                     )));
                                     continue;
                                 }
+                                if let Some(execution) = execution { pending_execution.insert(request_id.clone(), execution); }
+                                pending_methods.insert(request_id.clone(), request.method.clone());
                                 pending_requests.insert(request_id.clone(), response_tx);
                                 if let Err(err) = write_jsonrpc_message(
                                     &mut stream,
@@ -298,7 +321,8 @@ impl RemoteAppServerClient {
                                     if let Some(response_tx) = pending_requests.remove(&request_id) {
                                         let _ = response_tx.send(Err(err));
                                     }
-                                    let _ = deliver_event(
+                                    let _ = deliver_supervised_event(
+                                                &owner_slot,
                                         &event_tx,
                                         AppServerEvent::Disconnected {
                                             message: message.clone(),
@@ -372,10 +396,22 @@ impl RemoteAppServerClient {
                                 match serde_json::from_str::<JSONRPCMessage>(&text) {
                                     Ok(JSONRPCMessage::Response(response)) => {
                                         if let Some(response_tx) = pending_requests.remove(&response.id) {
-                                            let _ = response_tx.send(Ok(Ok(response.result)));
+                                            let method = pending_methods.remove(&response.id).unwrap_or_default();
+                                            let execution = pending_execution.remove(&response.id);
+                                            let result = Ok(Ok(response.result));
+                                            if let Some(owner) = sovereign_supervisor::get(&owner_slot) {
+                                                // Admission may await the independent owner. Never stop
+                                                // this socket pump while it needs cleanup RPC responses.
+                                                tokio::spawn(async move {
+                                                    let result = match owner.response(&method, &result, execution.as_ref()).await { Ok(()) => result, Err(error) => Err(error) };
+                                                    let _ = response_tx.send(result);
+                                                });
+                                            } else { let _ = response_tx.send(result); }
                                         }
                                     }
                                     Ok(JSONRPCMessage::Error(error)) => {
+                                        pending_methods.remove(&error.id);
+                                        pending_execution.remove(&error.id);
                                         if let Some(response_tx) = pending_requests.remove(&error.id) {
                                             let _ = response_tx.send(Ok(Err(error.error)));
                                         }
@@ -383,7 +419,8 @@ impl RemoteAppServerClient {
                                     Ok(JSONRPCMessage::Notification(notification)) => {
                                         if let Some(event) =
                                             app_server_event_from_notification(notification)
-                                            && let Err(err) = deliver_event(
+                                            && let Err(err) = deliver_supervised_event(
+                                                &owner_slot,
                                                 &event_tx,
                                                 event,
                                             )
@@ -397,7 +434,8 @@ impl RemoteAppServerClient {
                                         let method = request.method.clone();
                                         match ServerRequest::try_from(request) {
                                             Ok(request) => {
-                                                if let Err(err) = deliver_event(
+                                                if let Err(err) = deliver_supervised_event(
+                                                &owner_slot,
                                                     &event_tx,
                                                     AppServerEvent::ServerRequest(Box::new(request)),
                                                 )
@@ -428,7 +466,8 @@ impl RemoteAppServerClient {
                                                     let message = format!(
                                                         "remote app server at `{endpoint}` write failed: {err_message}"
                                                     );
-                                                    let _ = deliver_event(
+                                                    let _ = deliver_supervised_event(
+                                                &owner_slot,
                                                         &event_tx,
                                                         AppServerEvent::Disconnected {
                                                             message: message.clone(),
@@ -445,7 +484,8 @@ impl RemoteAppServerClient {
                                         let message = format!(
                                             "remote app server at `{endpoint}` sent invalid JSON-RPC: {err}"
                                         );
-                                        let _ = deliver_event(
+                                        let _ = deliver_supervised_event(
+                                                &owner_slot,
                                             &event_tx,
                                             AppServerEvent::Disconnected {
                                                 message: message.clone(),
@@ -466,7 +506,8 @@ impl RemoteAppServerClient {
                                 let message = format!(
                                     "remote app server at `{endpoint}` disconnected: {reason}"
                                 );
-                                let _ = deliver_event(
+                                let _ = deliver_supervised_event(
+                                                &owner_slot,
                                     &event_tx,
                                     AppServerEvent::Disconnected {
                                         message: message.clone(),
@@ -486,7 +527,8 @@ impl RemoteAppServerClient {
                                 let message = format!(
                                     "remote app server at `{endpoint}` transport failed: {err}"
                                 );
-                                let _ = deliver_event(
+                                let _ = deliver_supervised_event(
+                                                &owner_slot,
                                     &event_tx,
                                     AppServerEvent::Disconnected {
                                         message: message.clone(),
@@ -499,7 +541,8 @@ impl RemoteAppServerClient {
                                 let message = format!(
                                     "remote app server at `{endpoint}` closed the connection"
                                 );
-                                let _ = deliver_event(
+                                let _ = deliver_supervised_event(
+                                                &owner_slot,
                                     &event_tx,
                                     AppServerEvent::Disconnected {
                                         message: message.clone(),
@@ -513,6 +556,9 @@ impl RemoteAppServerClient {
                 }
             }
 
+            if let Some(owner) = sovereign_supervisor::get(&owner_slot) {
+                owner.disconnected();
+            }
             let (err_kind, err_message) = worker_exit_error.unwrap_or_else(|| {
                 (
                     ErrorKind::BrokenPipe,
@@ -525,12 +571,58 @@ impl RemoteAppServerClient {
         });
 
         Ok(Self {
+            sovereign,
+            endpoint_identity,
             command_tx,
             event_rx,
             pending_events: pending_events.into(),
             metadata,
             worker_handle,
         })
+    }
+
+    pub fn server_supports_sovereign_read_head(&self) -> bool {
+        self.metadata.sovereign_read_head
+    }
+    pub fn sovereign_callback_supervisor(&self) -> Option<SovereignCallbackSupervisor> {
+        sovereign_supervisor::owner(&self.sovereign)
+    }
+    pub async fn enable_sovereign_read_head(&mut self, root: PathBuf) -> IoResult<()> {
+        sovereign_supervisor::validate_native_root(&root)?;
+        if !self.metadata.sovereign_read_head {
+            return Err(IoError::other(
+                "remote server has not admitted Sovereign read_head mode",
+            ));
+        }
+        let owner = SovereignCallbackSupervisor::start(
+            AppServerRequestHandle::Remote(self.request_handle()),
+            root,
+            self.endpoint_identity.clone(),
+        )?;
+        sovereign_supervisor::install(&self.sovereign, owner.clone())?;
+        self.pending_events.retain(|event| !owner.feed_event(event));
+        Ok(())
+    }
+    pub async fn reattach_sovereign_read_head(
+        &mut self,
+        retained: SovereignCallbackSupervisor,
+    ) -> IoResult<()> {
+        retained.validate_native_binding()?;
+        if !self.metadata.sovereign_read_head || self.sovereign_callback_supervisor().is_some() {
+            return Err(IoError::other(
+                "remote Sovereign recovery admission refused",
+            ));
+        }
+        retained
+            .reconnect(
+                &self.endpoint_identity,
+                AppServerRequestHandle::Remote(self.request_handle()),
+            )
+            .await?;
+        sovereign_supervisor::install(&self.sovereign, retained.clone())?;
+        self.pending_events
+            .retain(|event| !retained.feed_event(event));
+        Ok(())
     }
 
     pub fn request_handle(&self) -> RemoteAppServerRequestHandle {
@@ -602,7 +694,30 @@ impl RemoteAppServerClient {
     }
 
     pub async fn shutdown(self) -> IoResult<()> {
+        if let Some(owner) = self.sovereign_callback_supervisor()
+            && let Err(error) = owner.drain().await
+        {
+            // HOLD must retain the live event route as well as the callback actor.
+            // Keep this exact transport owned until cleanup-only recovery settles;
+            // the caller receives a bounded error and may retain/reconnect the actor.
+            tokio::spawn(async move {
+                loop {
+                    if owner.drain().await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                let _ = self.shutdown_transport().await;
+            });
+            return Err(error);
+        }
+        self.shutdown_transport().await
+    }
+
+    async fn shutdown_transport(self) -> IoResult<()> {
         let Self {
+            sovereign: _sovereign,
+            endpoint_identity: _,
             command_tx,
             event_rx,
             pending_events: _pending_events,
@@ -884,6 +999,7 @@ where
                     })?;
                     match message {
                         JSONRPCMessage::Response(response) if response.id == initialize_request_id => {
+                            metadata.sovereign_read_head = response.result.get("sovereignReadHead").and_then(serde_json::Value::as_bool).unwrap_or(false);
                             metadata.server_version = response
                                 .result
                                 .get("userAgent")
@@ -1004,6 +1120,19 @@ fn app_server_event_from_notification(notification: JSONRPCNotification) -> Opti
     }
 }
 
+fn deliver_supervised_event(
+    owner_slot: &sovereign_supervisor::WeakSovereignSlot,
+    event_tx: &mpsc::UnboundedSender<AppServerEvent>,
+    event: AppServerEvent,
+) -> IoResult<()> {
+    if let Some(owner) = sovereign_supervisor::get(owner_slot)
+        && owner.feed_event(&event)
+    {
+        return Ok(());
+    }
+    deliver_event(event_tx, event)
+}
+
 fn deliver_event(
     event_tx: &mpsc::UnboundedSender<AppServerEvent>,
     event: AppServerEvent,
@@ -1090,6 +1219,8 @@ mod tests {
             let _ = delivered_tx.send(result);
         });
         let client = RemoteAppServerClient {
+            sovereign: sovereign_supervisor::slot(),
+            endpoint_identity: "test".into(),
             command_tx,
             event_rx,
             pending_events: VecDeque::new(),

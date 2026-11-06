@@ -182,7 +182,27 @@ impl Session {
             ensure_configs_stay_owner_provided(current_environments, &environments.environments)?;
         }
 
-        current.apply(updates, current_environments)
+        let next = current.apply(updates, current_environments)?;
+        if self
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some()
+            && (next.cwd() != current.cwd()
+                || next.environments != current.environments
+                || next.permission_profile() != current.permission_profile()
+                || next.active_permission_profile() != current.active_permission_profile()
+                || next.step_settings.collaboration_mode.model()
+                    != current.step_settings.collaboration_mode.model())
+        {
+            return Err(ConstraintError::InvalidValue {
+                field_name: "sovereign_owner_settings",
+                candidate: "changed owner scope".into(),
+                allowed: "the admitted model, checkout, environments and permission profile".into(),
+                requirement_source: codex_config::RequirementSource::Unknown,
+            });
+        }
+        Ok(next)
     }
 
     /// Activates the environments accepted for a new task. Configuration may have arrived for

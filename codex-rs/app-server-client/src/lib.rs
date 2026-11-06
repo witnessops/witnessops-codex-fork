@@ -24,6 +24,15 @@ mod cloud;
 mod path;
 mod remote;
 mod remote_websocket;
+pub mod sovereign_callback;
+mod sovereign_supervisor;
+pub use sovereign_supervisor::SovereignCallbackSupervisor;
+#[cfg(test)]
+#[path = "sovereign_callback_integration_tests.rs"]
+mod sovereign_callback_integration_tests;
+#[cfg(test)]
+#[path = "sovereign_callback_socket_tests.rs"]
+mod sovereign_callback_socket_tests;
 pub use cloud::CloudClient;
 pub use cloud::CloudCommand;
 pub use cloud::CloudOperation;
@@ -342,6 +351,8 @@ enum ClientCommand {
 /// callers aligned with app-server behavior while still avoiding a process
 /// boundary.
 pub struct InProcessAppServerClient {
+    sovereign: sovereign_supervisor::SovereignSlot,
+    sovereign_read_head: bool,
     command_tx: mpsc::Sender<ClientCommand>,
     event_rx: mpsc::UnboundedReceiver<InProcessServerEvent>,
     worker_handle: tokio::task::JoinHandle<()>,
@@ -371,9 +382,21 @@ impl InProcessAppServerClient {
     /// The returned client is ready for requests and ordered event consumption.
     /// Request queues remain bounded without blocking on unread notifications.
     pub async fn start(args: InProcessClientStartArgs) -> IoResult<Self> {
+        Self::start_with_owner_mode(args, codex_app_server::DynamicToolOwnerMode::Normal).await
+    }
+
+    /// Explicit immutable server mode for embedders which provide their own callback owner.
+    pub async fn start_with_owner_mode(
+        args: InProcessClientStartArgs,
+        mode: codex_app_server::DynamicToolOwnerMode,
+    ) -> IoResult<Self> {
         let channel_capacity = args.channel_capacity.max(1);
-        let mut handle =
-            codex_app_server::in_process::start(args.into_runtime_start_args()).await?;
+        let sovereign_read_head = mode == codex_app_server::DynamicToolOwnerMode::SovereignReadHead;
+        let mut handle = codex_app_server::in_process::start_with_owner_mode(
+            args.into_runtime_start_args(),
+            mode,
+        )
+        .await?;
         let request_sender = handle.sender();
         let (command_tx, mut command_rx) = mpsc::channel::<ClientCommand>(channel_capacity);
         // e9996ec62a preserved transcript events by awaiting a bounded queue, but that can
@@ -381,6 +404,8 @@ impl InProcessAppServerClient {
         // Match the remote-client fix in 79ea57715636: only this local consumer queue is
         // unbounded; commands and the embedded runtime stay bounded and events remain ordered.
         let (event_tx, event_rx) = mpsc::unbounded_channel::<InProcessServerEvent>();
+        let sovereign = sovereign_supervisor::slot();
+        let owner_slot = Arc::downgrade(&sovereign);
 
         let worker_handle = tokio::spawn(async move {
             let mut event_stream_enabled = true;
@@ -389,6 +414,16 @@ impl InProcessAppServerClient {
                     command = command_rx.recv() => {
                         match command {
                             Some(ClientCommand::Request { request, response_tx }) => {
+                                let owner = sovereign_supervisor::get(&owner_slot);
+                                let method = request.method_name().to_owned();
+                                let execution = owner.as_ref().and_then(|owner| {
+                                    let value = serde_json::to_value(request.as_ref()).ok();
+                                    owner.begin_execution(&method, value.as_ref().and_then(|value| value.get("params")))
+                                });
+                                if let Some(owner) = &owner && let Err(error) = owner.check_request(&request) {
+                                    let _ = response_tx.send(Err(error));
+                                    continue;
+                                }
                                 let request_sender = request_sender.clone();
                                 // Request waits happen on a detached task so
                                 // this loop can keep draining runtime events
@@ -405,6 +440,9 @@ impl InProcessAppServerClient {
                                     tokio::select! {
                                         _ = response_tx.closed(), if cancellable => {}
                                         result = request_sender.request(*request) => {
+                                            let result = if let Some(owner) = owner {
+                                                match owner.response(&method, &result, execution.as_ref()).await { Ok(()) => result, Err(error) => Err(error) }
+                                            } else { result };
                                             let _ = response_tx.send(result);
                                         }
                                     }
@@ -449,6 +487,14 @@ impl InProcessAppServerClient {
                         let Some(event) = event else {
                             break;
                         };
+                        if let Some(owner) = sovereign_supervisor::get(&owner_slot) {
+                            match &event {
+                                InProcessServerEvent::ServerRequest(request) if owner.feed_request(request) => continue,
+                                InProcessServerEvent::ServerNotification(notification) => owner.feed_notification(notification),
+                                InProcessServerEvent::Lagged { .. } => owner.disconnected(),
+                                _ => {}
+                            }
+                        }
                         if let InProcessServerEvent::ServerRequest(request) = &event
                             && let ServerRequest::ChatgptAuthTokensRefresh { request_id, .. } =
                                 request.as_ref()
@@ -475,13 +521,50 @@ impl InProcessAppServerClient {
                     }
                 }
             }
+            if let Some(owner) = sovereign_supervisor::get(&owner_slot) {
+                owner.disconnected();
+            }
         });
 
         Ok(Self {
+            sovereign,
+            sovereign_read_head,
             command_tx,
             event_rx,
             worker_handle,
         })
+    }
+
+    pub async fn start_sovereign_read_head(
+        args: InProcessClientStartArgs,
+        root: std::path::PathBuf,
+    ) -> IoResult<Self> {
+        sovereign_supervisor::validate_native_root(&root)?;
+        let client = Self::start_with_owner_mode(
+            args,
+            codex_app_server::DynamicToolOwnerMode::SovereignReadHead,
+        )
+        .await?;
+        let owner = match SovereignCallbackSupervisor::start(
+            AppServerRequestHandle::InProcess(client.request_handle()),
+            root,
+            "embedded".into(),
+        ) {
+            Ok(owner) => owner,
+            Err(error) => {
+                let _ = client.shutdown().await;
+                return Err(error);
+            }
+        };
+        sovereign_supervisor::install(&client.sovereign, owner)?;
+        Ok(client)
+    }
+
+    pub fn sovereign_callback_supervisor(&self) -> Option<SovereignCallbackSupervisor> {
+        sovereign_supervisor::owner(&self.sovereign)
+    }
+    pub fn server_supports_sovereign_read_head(&self) -> bool {
+        self.sovereign_read_head
     }
 
     pub fn request_handle(&self) -> InProcessAppServerRequestHandle {
@@ -591,7 +674,30 @@ impl InProcessAppServerClient {
     /// If graceful shutdown exceeds timeout, the worker task is aborted to
     /// avoid leaking background tasks in embedding callers.
     pub async fn shutdown(self) -> IoResult<()> {
+        if let Some(owner) = self.sovereign_callback_supervisor()
+            && let Err(error) = owner.drain().await
+        {
+            // HOLD must retain the live event route as well as the callback actor.
+            // Keep this exact transport owned until cleanup-only recovery settles;
+            // the caller receives a bounded error and may retain/reconnect the actor.
+            tokio::spawn(async move {
+                loop {
+                    if owner.drain().await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                let _ = self.shutdown_transport().await;
+            });
+            return Err(error);
+        }
+        self.shutdown_transport().await
+    }
+
+    async fn shutdown_transport(self) -> IoResult<()> {
         let Self {
+            sovereign: _sovereign,
+            sovereign_read_head: _,
             command_tx,
             event_rx,
             worker_handle,
@@ -754,6 +860,51 @@ impl AppServerRequestHandle {
 }
 
 impl AppServerClient {
+    pub fn server_supports_sovereign_read_head(&self) -> bool {
+        match self {
+            Self::InProcess(client) => client.server_supports_sovereign_read_head(),
+            Self::Remote(client) => client.server_supports_sovereign_read_head(),
+            Self::Cloud(_) => false,
+        }
+    }
+    pub fn sovereign_callback_supervisor(&self) -> Option<SovereignCallbackSupervisor> {
+        match self {
+            Self::InProcess(client) => client.sovereign_callback_supervisor(),
+            Self::Remote(client) => client.sovereign_callback_supervisor(),
+            Self::Cloud(_) => None,
+        }
+    }
+    pub async fn enable_sovereign_read_head(&mut self, root: std::path::PathBuf) -> IoResult<()> {
+        sovereign_supervisor::validate_native_root(&root)?;
+        match self {
+            Self::Remote(client) => client.enable_sovereign_read_head(root).await,
+            Self::InProcess(client) if client.sovereign_read_head => {
+                if client.sovereign_callback_supervisor().is_some() {
+                    return Ok(());
+                }
+                let owner = SovereignCallbackSupervisor::start(
+                    AppServerRequestHandle::InProcess(client.request_handle()),
+                    root,
+                    "embedded".into(),
+                )?;
+                sovereign_supervisor::install(&client.sovereign, owner)
+            }
+            _ => Err(IoError::other(
+                "server has not admitted Sovereign read_head mode",
+            )),
+        }
+    }
+    pub async fn reattach_sovereign_read_head(
+        &mut self,
+        retained: SovereignCallbackSupervisor,
+    ) -> IoResult<()> {
+        match self {
+            Self::Remote(client) => client.reattach_sovereign_read_head(retained).await,
+            _ => Err(IoError::other(
+                "Sovereign recovery requires the original remote endpoint",
+            )),
+        }
+    }
     /// App-server platform family, which can differ from the executor's platform.
     /// Older remote servers may omit this metadata.
     pub fn platform_family(&self) -> Option<&str> {
@@ -2152,6 +2303,8 @@ mod tests {
         drop(event_tx);
 
         let mut client = InProcessAppServerClient {
+            sovereign: sovereign_supervisor::slot(),
+            sovereign_read_head: false,
             command_tx,
             event_rx,
             worker_handle,
@@ -2260,6 +2413,8 @@ mod tests {
             let _ = response_tx.send(Ok(()));
         });
         let client = InProcessAppServerClient {
+            sovereign: sovereign_supervisor::slot(),
+            sovereign_read_head: false,
             command_tx,
             event_rx,
             worker_handle,

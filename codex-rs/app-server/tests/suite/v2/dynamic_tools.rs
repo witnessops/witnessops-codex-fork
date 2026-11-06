@@ -481,7 +481,14 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
         other => panic!("expected DynamicToolCall request, got {other:?}"),
     };
 
+    assert!(
+        params
+            .cleanup_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty())
+    );
     let expected = DynamicToolCallParams {
+        cleanup_token: params.cleanup_token.clone(),
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         call_id: call_id.to_string(),
@@ -492,7 +499,9 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
     assert_eq!(params, expected);
 
     // Respond to the tool call so the model receives a function_call_output.
+    // This fixture only constructs text in memory; it has no external work to clean up.
     let response = DynamicToolCallResponse {
+        cleanup_complete: true,
         content_items: vec![DynamicToolCallOutputContentItem::InputText {
             text: "dynamic-ok".to_string(),
         }],
@@ -671,7 +680,14 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
         other => panic!("expected DynamicToolCall request, got {other:?}"),
     };
 
+    assert!(
+        actual_params
+            .cleanup_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty())
+    );
     let params = DynamicToolCallParams {
+        cleanup_token: actual_params.cleanup_token.clone(),
         thread_id,
         turn_id,
         call_id: call_id.to_string(),
@@ -725,7 +741,9 @@ async fn dynamic_tool_call_round_trip_handles_content_items() -> Result<()> {
             audio_url: INLINE_AUDIO_DATA_URL.to_string(),
         },
     ];
+    // All fixture content is constructed in memory; no worker or external effect remains.
     let response = DynamicToolCallResponse {
+        cleanup_complete: true,
         content_items: response_content_items,
         success: true,
     };
@@ -819,6 +837,7 @@ async fn dynamic_tool_remote_image_response_becomes_model_visible_error() -> Res
     } = start_function_dynamic_tool_call(call_id).await?;
 
     let response = DynamicToolCallResponse {
+        cleanup_complete: false,
         content_items: vec![DynamicToolCallOutputContentItem::InputImage {
             image_url: "https://example.com/tool.png".to_string(),
         }],
@@ -875,6 +894,7 @@ async fn dynamic_tool_remote_audio_response_becomes_model_visible_error() -> Res
     } = start_function_dynamic_tool_call(call_id).await?;
 
     let response = DynamicToolCallResponse {
+        cleanup_complete: false,
         content_items: vec![DynamicToolCallOutputContentItem::InputAudio {
             audio_url: "https://example.com/tool.wav".to_string(),
         }],
