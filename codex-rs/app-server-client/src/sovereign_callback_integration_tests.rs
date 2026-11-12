@@ -44,18 +44,33 @@ const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const OWNER_CWD: &str = "/home/karol/WitnessOps/WitnessOps/repos/witnessops-codex-ops";
 const DEADLINE: Duration = Duration::from_secs(15);
 
-struct Fixture {
+pub(super) struct Fixture {
     _codex_home: TempDir,
-    repo: TempDir,
+    pub(super) repo: TempDir,
     server: wiremock::MockServer,
-    client: AppServerClient,
-    request: ServerRequest,
-    identity: DynamicToolCleanupIdentity,
+    pub(super) client: AppServerClient,
+    pub(super) request: ServerRequest,
+    pub(super) identity: DynamicToolCleanupIdentity,
+    pub(super) start_response: ThreadStartResponse,
     model_call_id: String,
 }
 
 impl Fixture {
-    async fn start(call_id: &str) -> Result<Self> {
+    pub(super) async fn start(call_id: &str) -> Result<Self> {
+        Self::start_inner(call_id, None).await
+    }
+
+    pub(super) async fn start_persisted(
+        call_id: &str,
+        history_mode: codex_app_server_protocol::ThreadHistoryMode,
+    ) -> Result<Self> {
+        Self::start_inner(call_id, Some(history_mode)).await
+    }
+
+    async fn start_inner(
+        call_id: &str,
+        history_mode: Option<codex_app_server_protocol::ThreadHistoryMode>,
+    ) -> Result<Self> {
         let server = create_mock_responses_server_sequence_unchecked(vec![
             responses::sse(vec![
                 responses::ev_response_created("callback-model-1"),
@@ -157,7 +172,8 @@ enabled = false
                     cwd: Some(OWNER_CWD.into()),
                     model: Some("gpt-5.6-terra".into()),
                     permissions: Some("wops-codex-ops-read".into()),
-                    ephemeral: Some(true),
+                    ephemeral: Some(history_mode.is_none()),
+                    history_mode,
                     ..Default::default()
                 },
             })
@@ -184,11 +200,20 @@ enabled = false
                         break Ok::<_, anyhow::Error>(*request);
                     }
                     AppServerEvent::Disconnected { .. } => anyhow::bail!("unexpected disconnect"),
+                    AppServerEvent::ServerNotification(notification)
+                        if matches!(
+                            notification.as_ref(),
+                            ServerNotification::Error(_) | ServerNotification::TurnCompleted(_)
+                        ) =>
+                    {
+                        anyhow::bail!("fixture turn ended before its callback: {notification:?}");
+                    }
                     _ => {}
                 }
             }
         })
-        .await??;
+        .await
+        .context("waiting for the actual fixture's initial callback")??;
         let ServerRequest::DynamicToolCall { request_id, params } = &request else {
             unreachable!();
         };
@@ -216,6 +241,7 @@ enabled = false
             request,
             identity,
             model_call_id: call_id.into(),
+            start_response: thread,
         })
     }
 
@@ -274,7 +300,7 @@ enabled = false
         }).await?
     }
 
-    async fn completed_turn(&mut self) -> Result<()> {
+    pub(super) async fn completed_turn(&mut self) -> Result<()> {
         timeout(DEADLINE, async {
             loop {
                 match self
@@ -303,7 +329,7 @@ enabled = false
         .await?
     }
 
-    async fn shutdown(self) -> Result<()> {
+    pub(super) async fn shutdown(self) -> Result<()> {
         self.client.shutdown().await?;
         Ok(())
     }
@@ -581,7 +607,7 @@ async fn sovereign_callback_cleanup_actual_server_recovers_malformed_reply() -> 
 
 /// The real server consumes the first acknowledgement; the proxy then loses the
 /// receipt at the client transport boundary. Only that fault is synthetic.
-fn lose_first_ack_receipt(
+pub(super) fn lose_first_ack_receipt(
     real: AppServerRequestHandle,
 ) -> (
     AppServerRequestHandle,

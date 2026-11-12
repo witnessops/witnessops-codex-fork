@@ -654,6 +654,7 @@ enabled = false
     )
     .await;
 
+    #[cfg(target_os = "linux")]
     let mut cleanup_watch = None;
     let connection_id = ConnectionId(201);
     let session = Arc::new(ConnectionSessionState::new(ConnectionOrigin::WebSocket));
@@ -895,6 +896,7 @@ enabled = false
             }
             if probe_cancel || probe_replay {
                 let probe = codex_core::test_support::sovereign_start_cancellation_for_test(&child).await?;
+                #[cfg(target_os = "linux")]
                 if cleanup_watch.is_none() {
                     cleanup_watch = Some(codex_core::test_support::sovereign_watch_helper_exit_for_test()?);
                 }
@@ -1031,6 +1033,7 @@ enabled = false
     processor.drain_background_tasks().await;
     state_db.close().await;
     drop(processor);
+    #[cfg(target_os = "linux")]
     if let Some(watch) = cleanup_watch {
         let cleanup =
             codex_core::test_support::sovereign_verify_helper_exit_for_test(watch).await?;

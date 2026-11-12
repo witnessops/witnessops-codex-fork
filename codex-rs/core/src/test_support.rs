@@ -1025,6 +1025,7 @@ pub async fn sovereign_finish_cancellation_for_test(
     )
 }
 
+#[cfg(target_os = "linux")]
 pub struct SovereignHelperExitWatch {
     records: Vec<serde_json::Value>,
     descriptors: Vec<(u32, String, tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>)>,
@@ -1110,6 +1111,7 @@ pub async fn sovereign_replay_cancelled_cell_for_test(
     )
 }
 
+#[cfg(target_os = "linux")]
 fn sovereign_process_identity(pid: u32) -> anyhow::Result<(u32, String)> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let (_, tail) = text
@@ -1120,6 +1122,7 @@ fn sovereign_process_identity(pid: u32) -> anyhow::Result<(u32, String)> {
 }
 
 /// Capture pidfds while the isolated helper is known to be alive. No signals are sent.
+#[cfg(target_os = "linux")]
 pub fn sovereign_watch_helper_exit_for_test() -> anyhow::Result<SovereignHelperExitWatch> {
     use std::os::fd::FromRawFd;
     let host = std::path::PathBuf::from(std::env::var("CARGO_TARGET_DIR")?)
@@ -1186,6 +1189,7 @@ pub fn sovereign_watch_helper_exit_for_test() -> anyhow::Result<SovereignHelperE
 
 /// Wait on kernel process-exit readiness, then observe reaping of the same identities.
 /// Called after fixture thread shutdown and dropping the process-owned provider.
+#[cfg(target_os = "linux")]
 pub async fn sovereign_verify_helper_exit_for_test(
     watch: SovereignHelperExitWatch,
 ) -> anyhow::Result<serde_json::Value> {

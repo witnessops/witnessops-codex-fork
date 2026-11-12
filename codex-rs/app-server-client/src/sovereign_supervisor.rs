@@ -301,7 +301,12 @@ impl SovereignCallbackSupervisor {
             return Err(hold_error());
         }
         self.revoke_execution();
-        self.inner.epoch.fetch_add(1, Ordering::AcqRel);
+        {
+            // Serialize attachment replacement with history reconciliation so a
+            // response cannot pass its epoch check and mutate the next owner.
+            let _turns = self.inner.turns.lock().map_err(|_| hold_error())?;
+            self.inner.epoch.fetch_add(1, Ordering::AcqRel);
+        }
         self.inner.phase.store(RECOVERY_ONLY, Ordering::Release);
         let (send, receive) = oneshot::channel();
         self.inner
@@ -503,7 +508,13 @@ impl SovereignCallbackSupervisor {
     ) -> Option<ExecutionLease> {
         if !matches!(
             method,
-            "thread/start" | "thread/resume" | "thread/fork" | "turn/start" | "review/start"
+            "thread/start"
+                | "thread/resume"
+                | "thread/fork"
+                | "thread/read"
+                | "thread/turns/list"
+                | "turn/start"
+                | "review/start"
         ) {
             return None;
         }
@@ -515,6 +526,63 @@ impl SovereignCallbackSupervisor {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
         })
+    }
+
+    fn reconcile_terminal_turns(
+        &self,
+        method: &str,
+        value: &serde_json::Value,
+        execution: Option<&ExecutionLease>,
+    ) -> io::Result<()> {
+        let Some(thread) = execution.and_then(|lease| lease.thread.as_ref()) else {
+            return Ok(());
+        };
+        // History may be partial or paginated. It is evidence only for the
+        // admitted thread named by this request, never for an omitted turn.
+        let admitted = self
+            .inner
+            .threads
+            .lock()
+            .map_err(|_| hold_error())?
+            .contains(thread);
+        if !admitted {
+            return Ok(());
+        }
+        let reported = match method {
+            "thread/resume" | "thread/read" => {
+                if value
+                    .pointer("/thread/id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(thread.as_str())
+                {
+                    return Err(hold_error());
+                }
+                value.pointer("/thread/turns")
+            }
+            "thread/turns/list" => value.get("data"),
+            _ => return Ok(()),
+        };
+        let mut turns = self.inner.turns.lock().map_err(|_| hold_error())?;
+        if self.binding_epoch != self.inner.epoch.load(Ordering::Acquire) {
+            return Err(hold_error());
+        }
+        for turn in reported
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if matches!(
+                turn.get("status").and_then(serde_json::Value::as_str),
+                Some("completed" | "interrupted" | "failed")
+            ) && let Some(id) = turn.get("id").and_then(serde_json::Value::as_str)
+                && turns.active.get(thread).is_some_and(|active| active == id)
+            {
+                // This settles only the retained turn. Callback cleanup still
+                // requires its own exact acknowledgement before drain succeeds.
+                turns.completed(thread.clone(), id.to_owned());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn response(
@@ -539,6 +607,12 @@ impl SovereignCallbackSupervisor {
             }
             return Ok(());
         }
+        if matches!(method, "thread/read" | "thread/turns/list") {
+            if let Ok(Ok(value)) = result {
+                self.reconcile_terminal_turns(method, value, execution)?;
+            }
+            return Ok(());
+        }
         if !matches!(method, "thread/start" | "thread/resume" | "thread/fork") {
             return Ok(());
         }
@@ -557,25 +631,41 @@ impl SovereignCallbackSupervisor {
             .and_then(|value| value.get("id"))
             .and_then(serde_json::Value::as_str)
             .ok_or_else(hold_error)?;
+        if method == "thread/resume"
+            && let Some(requested) = execution.and_then(|lease| lease.thread.as_ref())
+            && requested != thread
+        {
+            return Err(hold_error());
+        }
         let (send, receive) = oneshot::channel();
         self.inner
             .commands
             .send(Command::Admit(thread.to_owned(), send))
             .map_err(|_| hold_error())?;
         receive.await.map_err(|_| hold_error())??;
-        if let Some(active) = value
-            .get("thread")
-            .and_then(|value| value.get("turns"))
-            .and_then(serde_json::Value::as_array)
         {
-            for turn in active {
-                if turn.get("status").and_then(serde_json::Value::as_str) == Some("inProgress")
-                    && let Some(id) = turn.get("id").and_then(serde_json::Value::as_str)
-                    && let Ok(mut turns) = self.inner.turns.lock()
-                {
-                    turns.started(thread.to_owned(), id.to_owned());
+            let mut turns = self.inner.turns.lock().map_err(|_| hold_error())?;
+            // Admission awaits the lifecycle pump; reconnect may have replaced
+            // this attachment while that response was suspended.
+            if self.binding_epoch != self.inner.epoch.load(Ordering::Acquire) {
+                return Err(hold_error());
+            }
+            if let Some(active) = value
+                .get("thread")
+                .and_then(|value| value.get("turns"))
+                .and_then(serde_json::Value::as_array)
+            {
+                for turn in active {
+                    if turn.get("status").and_then(serde_json::Value::as_str) == Some("inProgress")
+                        && let Some(id) = turn.get("id").and_then(serde_json::Value::as_str)
+                    {
+                        turns.started(thread.to_owned(), id.to_owned());
+                    }
                 }
             }
+        }
+        if method == "thread/resume" {
+            self.reconcile_terminal_turns(method, value, execution)?;
         }
         Ok(())
     }
@@ -1154,5 +1244,772 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    fn resume_with_turns(turns: serde_json::Value) -> serde_json::Value {
+        let mut response = scope_response();
+        response["thread"]["turns"] = turns;
+        response
+    }
+
+    async fn retained_turn_fixture() -> (
+        tempfile::TempDir,
+        SovereignCallbackSupervisor,
+        mpsc::Receiver<ClientCommand>,
+    ) {
+        let (root, handle, commands) = fixture();
+        let owner = SovereignCallbackSupervisor::start_inner(
+            handle,
+            root.path().to_owned(),
+            "fixture".into(),
+            false,
+        )
+        .unwrap();
+        admit(&owner).await;
+        owner.inner.phase.store(RECOVERY_ONLY, Ordering::Release);
+        owner
+            .inner
+            .turns
+            .lock()
+            .unwrap()
+            .started("thread".into(), "turn".into());
+        (root, owner, commands)
+    }
+
+    async fn observe_resume(
+        owner: &SovereignCallbackSupervisor,
+        value: serde_json::Value,
+    ) -> io::Result<()> {
+        let lease = owner.begin_execution(
+            "thread/resume",
+            Some(&serde_json::json!({"threadId":"thread"})),
+        );
+        owner
+            .response("thread/resume", &Ok(Ok(value)), lease.as_ref())
+            .await
+    }
+
+    #[tokio::test]
+    async fn recovery_resume_terminal_status_reconciles_exact_turn_once() {
+        for status in ["completed", "interrupted", "failed"] {
+            let (_root, owner, _commands) = retained_turn_fixture().await;
+            let response = resume_with_turns(serde_json::json!([{"id":"turn","status":status}]));
+            observe_resume(&owner, response.clone()).await.unwrap();
+            assert!(
+                owner.inner.turns.lock().unwrap().active.is_empty(),
+                "explicit {status} evidence did not settle the retained turn"
+            );
+            observe_resume(&owner, response.clone()).await.unwrap();
+            let notification = ServerNotification::TurnCompleted(
+                codex_app_server_protocol::TurnCompletedNotification {
+                    thread_id: "thread".into(),
+                    turn: codex_app_server_protocol::Turn {
+                        id: "turn".into(),
+                        root_turn_id: None,
+                        items_view: codex_app_server_protocol::TurnItemsView::Full,
+                        items: Vec::new(),
+                        status: serde_json::from_value(serde_json::json!(status)).unwrap(),
+                        error: None,
+                        started_at: None,
+                        completed_at: Some(0),
+                        duration_ms: Some(1),
+                    },
+                },
+            );
+            owner.feed_notification(&notification);
+            owner.feed_notification(&notification);
+            assert!(
+                owner.inner.turns.lock().unwrap().active.is_empty(),
+                "duplicate terminal notifications revived the settled turn"
+            );
+            owner
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .started("thread".into(), "newer-turn".into());
+            observe_resume(&owner, response).await.unwrap();
+            owner.feed_notification(&notification);
+            assert_eq!(
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .active
+                    .get("thread")
+                    .map(String::as_str),
+                Some("newer-turn"),
+                "duplicate old response or notification cleared a replacement turn"
+            );
+            let ServerNotification::TurnCompleted(mut newer_notification) = notification else {
+                unreachable!();
+            };
+            newer_notification.turn.id = "newer-turn".into();
+            {
+                let _turns = owner.inner.turns.lock().unwrap();
+                owner.inner.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+            owner.feed_notification(&ServerNotification::TurnCompleted(newer_notification));
+            assert_eq!(
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .active
+                    .get("thread")
+                    .map(String::as_str),
+                Some("newer-turn"),
+                "stale attachment's terminal notification cleared the current turn"
+            );
+            owner
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .completed("thread".into(), "newer-turn".into());
+            owner.drain().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_resume_unknown_omitted_paginated_and_wrong_identity_remain_pending() {
+        for turns in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{"id":"turn","status":"inProgress"}]),
+            serde_json::json!([{"id":"turn","status":"unknown"}]),
+            serde_json::json!([{"id":"turn"}]),
+            serde_json::json!([{"status":"completed"}]),
+            serde_json::json!([{"id":"different-turn","status":"completed"}]),
+        ] {
+            let (_root, owner, _commands) = retained_turn_fixture().await;
+            let mut response = resume_with_turns(turns.clone());
+            response["turnsBackwardsCursor"] = serde_json::json!("more-history");
+            observe_resume(&owner, response).await.unwrap();
+            assert_eq!(
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .active
+                    .get("thread")
+                    .map(String::as_str),
+                Some("turn"),
+                "unknown/omitted/other turn evidence cleared the obligation: {turns}"
+            );
+        }
+        let (_root, owner, _commands) = retained_turn_fixture().await;
+        owner
+            .inner
+            .threads
+            .lock()
+            .unwrap()
+            .insert("other-admitted-thread".into());
+        owner
+            .inner
+            .turns
+            .lock()
+            .unwrap()
+            .started("other-admitted-thread".into(), "turn".into());
+        let mut wrong_thread =
+            resume_with_turns(serde_json::json!([{"id":"turn","status":"completed"}]));
+        wrong_thread["thread"]["id"] = serde_json::json!("other-admitted-thread");
+        let _ = observe_resume(&owner, wrong_thread).await;
+        assert_eq!(
+            owner.inner.turns.lock().unwrap().active.len(),
+            2,
+            "response thread must match the requested thread, even when both were admitted"
+        );
+        let mut omitted = scope_response();
+        omitted["thread"].as_object_mut().unwrap().remove("turns");
+        observe_resume(&owner, omitted).await.unwrap();
+        assert_eq!(owner.inner.turns.lock().unwrap().active.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn recovery_resume_stale_scope_unbound_and_error_evidence_remain_pending() {
+        let (_root, owner, _commands) = retained_turn_fixture().await;
+        let terminal = resume_with_turns(serde_json::json!([{"id":"turn","status":"completed"}]));
+        // A read response is not bound to the resume execution lease. Neither it
+        // nor a failed interrupt is authority to infer terminal turn state.
+        owner
+            .response("thread/read", &Ok(Ok(terminal.clone())), None)
+            .await
+            .unwrap();
+        owner
+            .response(
+                "thread/turns/list",
+                &Ok(Ok(
+                    serde_json::json!({"data":[{"id":"turn","status":"completed"}]}),
+                )),
+                None,
+            )
+            .await
+            .unwrap();
+        owner
+            .response("thread/resume", &Ok(Ok(terminal.clone())), None)
+            .await
+            .unwrap();
+        for method in ["thread/resume", "turn/interrupt"] {
+            owner
+                .response(
+                    method,
+                    &Err(io::Error::other("transport unavailable")),
+                    None,
+                )
+                .await
+                .unwrap();
+            owner
+                .response(
+                    method,
+                    &Ok(Err(codex_app_server_protocol::JSONRPCErrorError {
+                        code: -32600,
+                        message: "no active turn to interrupt".into(),
+                        data: None,
+                    })),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            owner
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .active
+                .get("thread")
+                .map(String::as_str),
+            Some("turn")
+        );
+        let mut wrong_scope = terminal.clone();
+        wrong_scope["cwd"] = serde_json::json!("/unrelated");
+        assert!(observe_resume(&owner, wrong_scope).await.is_err());
+        assert_eq!(owner.inner.turns.lock().unwrap().active.len(), 1);
+        owner.inner.epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(observe_resume(&owner, terminal).await.is_err());
+        assert_eq!(owner.inner.turns.lock().unwrap().active.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_bound_read_and_page_require_exact_terminal_evidence() {
+        for method in ["thread/read", "thread/turns/list"] {
+            let (_root, owner, _commands) = retained_turn_fixture().await;
+            for turns in [
+                serde_json::json!([]),
+                serde_json::json!([{"id":"other","status":"completed"}]),
+                serde_json::json!([{"id":"older","status":"inProgress"}]),
+                serde_json::json!([{"id":"turn","status":"unknown"}]),
+            ] {
+                let value = if method == "thread/read" {
+                    resume_with_turns(turns)
+                } else {
+                    serde_json::json!({"data":turns,"nextCursor":"more"})
+                };
+                let lease =
+                    owner.begin_execution(method, Some(&serde_json::json!({"threadId":"thread"})));
+                owner
+                    .response(method, &Ok(Ok(value)), lease.as_ref())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    owner
+                        .inner
+                        .turns
+                        .lock()
+                        .unwrap()
+                        .active
+                        .get("thread")
+                        .map(String::as_str),
+                    Some("turn")
+                );
+            }
+            if method == "thread/read" {
+                owner
+                    .inner
+                    .threads
+                    .lock()
+                    .unwrap()
+                    .insert("other-admitted".into());
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .started("other-admitted".into(), "turn".into());
+                let mut wrong_thread =
+                    resume_with_turns(serde_json::json!([{"id":"turn","status":"completed"}]));
+                wrong_thread["thread"]["id"] = serde_json::json!("other-admitted");
+                let lease =
+                    owner.begin_execution(method, Some(&serde_json::json!({"threadId":"thread"})));
+                let _ = owner
+                    .response(method, &Ok(Ok(wrong_thread)), lease.as_ref())
+                    .await;
+                drop(lease);
+                assert_eq!(
+                    owner.inner.turns.lock().unwrap().active.len(),
+                    2,
+                    "mismatched response cleared another admitted thread"
+                );
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .completed("other-admitted".into(), "turn".into());
+            }
+            let turns = serde_json::json!([{"id":"turn","status":"completed"}]);
+            let value = if method == "thread/read" {
+                resume_with_turns(turns)
+            } else {
+                serde_json::json!({"data":turns,"nextCursor":"more"})
+            };
+            // A page has no thread ID in its payload: only the original request's
+            // binding establishes which admitted thread this evidence belongs to.
+            let wrong = owner.begin_execution(
+                method,
+                Some(&serde_json::json!({"threadId":"other-thread"})),
+            );
+            let _ = owner
+                .response(method, &Ok(Ok(value.clone())), wrong.as_ref())
+                .await;
+            drop(wrong);
+            assert_eq!(
+                owner
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .active
+                    .get("thread")
+                    .map(String::as_str),
+                Some("turn")
+            );
+            let lease =
+                owner.begin_execution(method, Some(&serde_json::json!({"threadId":"thread"})));
+            owner
+                .response(method, &Ok(Ok(value.clone())), lease.as_ref())
+                .await
+                .unwrap();
+            owner
+                .response(method, &Ok(Ok(value)), lease.as_ref())
+                .await
+                .unwrap();
+            drop(lease);
+            assert!(
+                owner.inner.turns.lock().unwrap().active.is_empty(),
+                "bound {method} ignored the exact terminal turn"
+            );
+            owner.drain().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_resume_epoch_change_during_admit_preserves_turn() {
+        let (_root, mut owner, _commands) = retained_turn_fixture().await;
+        // Replace only the test owner's command sender so the admission receipt
+        // can be held while a newer attachment invalidates this response.
+        let (send, mut receive) = mpsc::unbounded_channel();
+        Arc::get_mut(&mut owner.inner).unwrap().commands = send;
+        let responding = owner.clone();
+        let task = tokio::spawn(async move {
+            observe_resume(
+                &responding,
+                resume_with_turns(serde_json::json!([{"id":"turn","status":"completed"}])),
+            )
+            .await
+        });
+        let Command::Admit(thread, done) =
+            tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected admission checkpoint");
+        };
+        assert_eq!(thread, "thread");
+        {
+            let _turns = owner.inner.turns.lock().unwrap();
+            owner.inner.epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        done.send(Ok(())).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err(),
+            "response admitted before reconnect mutated the new attachment"
+        );
+        assert_eq!(
+            owner
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .active
+                .get("thread")
+                .map(String::as_str),
+            Some("turn")
+        );
+        owner
+            .inner
+            .turns
+            .lock()
+            .unwrap()
+            .completed("thread".into(), "turn".into());
+    }
+
+    #[tokio::test]
+    async fn recovery_generic_interrupt_refusal_does_not_release_drain() {
+        let (_root, owner, mut commands) = retained_turn_fixture().await;
+        let draining_owner = owner.clone();
+        let mut drain = tokio::spawn(async move { draining_owner.drain().await });
+        let ClientCommand::Request {
+            request,
+            response_tx,
+        } = tokio::time::timeout(Duration::from_secs(3), commands.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected interrupt");
+        };
+        assert!(matches!(*request, ClientRequest::TurnInterrupt { .. }));
+        response_tx
+            .send(Ok(Err(codex_app_server_protocol::JSONRPCErrorError {
+                code: -32600,
+                message: "no active turn to interrupt".into(),
+                data: None,
+            })))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut drain)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            owner
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .active
+                .get("thread")
+                .map(String::as_str),
+            Some("turn")
+        );
+        // Fixture teardown only: do not treat the refusal as a terminal receipt.
+        owner
+            .inner
+            .turns
+            .lock()
+            .unwrap()
+            .completed("thread".into(), "turn".into());
+        tokio::time::timeout(Duration::from_secs(3), drain)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_terminal_turn_does_not_acknowledge_pending_callback() {
+        let (root, handle, mut commands) = fixture();
+        let owner = SovereignCallbackSupervisor::start_inner(
+            handle.clone(),
+            root.path().to_owned(),
+            "fixture".into(),
+            false,
+        )
+        .unwrap();
+        admit(&owner).await;
+        let allow_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::clone(&allow_ack);
+        let server = tokio::spawn(async move {
+            let mut acknowledged = false;
+            while let Some(ClientCommand::Request {
+                request,
+                response_tx,
+            }) = commands.recv().await
+            {
+                let result = match *request {
+                    ClientRequest::DynamicToolCleanupRead { .. } => Ok(Ok(
+                        serde_json::json!({"status":if acknowledged {"acknowledged"} else {"running"}}),
+                    )),
+                    ClientRequest::DynamicToolCleanupAck { params, .. } => {
+                        assert!(params.response.cleanup_complete);
+                        if gate.load(Ordering::Acquire) {
+                            acknowledged = true;
+                            Ok(Ok(serde_json::json!({"alreadyAcknowledged":false})))
+                        } else {
+                            Err(io::Error::other("cleanup acknowledgement withheld"))
+                        }
+                    }
+                    ClientRequest::TurnInterrupt { .. } => {
+                        Ok(Err(codex_app_server_protocol::JSONRPCErrorError {
+                            code: -32600,
+                            message: "no active turn to interrupt".into(),
+                            data: None,
+                        }))
+                    }
+                    _ => panic!("unexpected fixture RPC"),
+                };
+                let _ = response_tx.send(result);
+            }
+        });
+        assert!(owner.feed_request(&ServerRequest::DynamicToolCall {
+            request_id: RequestId::Integer(21),
+            params: DynamicToolCallParams {
+                cleanup_token: Some("pending-cleanup-capability".into()),
+                thread_id: "thread".into(),
+                turn_id: "turn".into(),
+                call_id: "call".into(),
+                namespace: Some("witnessops".into()),
+                tool: "read_head".into(),
+                arguments: serde_json::json!({})
+            },
+        }));
+        until(|| {
+            owner
+                .status()
+                .calls
+                .first()
+                .is_some_and(|call| call.reaped && call.state == CallbackState::AckPending)
+        })
+        .await;
+        owner.disconnected();
+        owner.reconnect("fixture", handle.clone()).await.unwrap();
+        let attachment = slot();
+        install(&attachment, owner.clone()).unwrap();
+        let current = super::owner(&attachment).unwrap();
+        observe_resume(
+            &current,
+            resume_with_turns(serde_json::json!([{"id":"turn","status":"completed"}])),
+        )
+        .await
+        .unwrap();
+        let draining_owner = current.clone();
+        let mut drain = tokio::spawn(async move { draining_owner.drain().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut drain)
+                .await
+                .is_err(),
+            "terminal turn must not manufacture callback cleanup acknowledgement"
+        );
+        assert_ne!(current.status().calls[0].state, CallbackState::Acknowledged);
+        allow_ack.store(true, Ordering::Release);
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut drain).await;
+        let reconciled = current.inner.turns.lock().unwrap().active.is_empty();
+        // Always release the synthetic server after recording the actual result.
+        current
+            .inner
+            .turns
+            .lock()
+            .unwrap()
+            .completed("thread".into(), "turn".into());
+        if result.is_err() {
+            tokio::time::timeout(Duration::from_secs(3), drain)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        drop(current);
+        drop(attachment);
+        drop(owner);
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reconciled,
+            "explicit terminal evidence did not clear the retained turn"
+        );
+        result.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_actual_server_lost_terminal_notification_resumes_and_drains()
+    -> anyhow::Result<()> {
+        actual_server_lost_terminal_notification(false).await
+    }
+
+    #[tokio::test]
+    async fn recovery_actual_server_paginated_resume_waits_for_terminal_page() -> anyhow::Result<()>
+    {
+        actual_server_lost_terminal_notification(true).await
+    }
+
+    async fn actual_server_lost_terminal_notification(paginated: bool) -> anyhow::Result<()> {
+        use crate::sovereign_callback_integration_tests::Fixture;
+        use crate::sovereign_callback_integration_tests::lose_first_ack_receipt;
+        use anyhow::Context;
+        use codex_app_server_protocol::ThreadHistoryMode;
+        use codex_app_server_protocol::ThreadResumeParams;
+        let history_mode = if paginated {
+            ThreadHistoryMode::Paginated
+        } else {
+            ThreadHistoryMode::Legacy
+        };
+        let mut actual = Fixture::start_persisted("supervisor-lost-terminal", history_mode)
+            .await
+            .context("starting persistent actual-server fixture")?;
+        let (proxy, lost, proxy_task) = lose_first_ack_receipt(actual.client.request_handle());
+        let retained = SovereignCallbackSupervisor::start_inner(
+            proxy.clone(),
+            actual.repo.path().to_owned(),
+            "actual-in-process".into(),
+            false,
+        )?;
+        retained
+            .response(
+                "thread/start",
+                &Ok(Ok(serde_json::to_value(&actual.start_response)?)),
+                None,
+            )
+            .await?;
+        assert!(retained.feed_request(&actual.request));
+        until(|| lost.load(Ordering::SeqCst)).await;
+        retained.disconnected();
+        // Consume the genuine notification without delivering it to the owner:
+        // this is precisely the transport-loss fault under test.
+        actual
+            .completed_turn()
+            .await
+            .context("waiting for the genuine missed terminal notification")?;
+        assert_eq!(
+            retained
+                .inner
+                .turns
+                .lock()
+                .unwrap()
+                .active
+                .get(&actual.identity.thread_id),
+            Some(&actual.identity.turn_id)
+        );
+        retained
+            .reconnect("actual-in-process", actual.client.request_handle())
+            .await?;
+        let attachment = slot();
+        install(&attachment, retained.clone())?;
+        let current = super::owner(&attachment).unwrap();
+        let params = serde_json::json!({"threadId":actual.identity.thread_id});
+        let lease = current.begin_execution("thread/resume", Some(&params));
+        let response = actual
+            .client
+            .request(ClientRequest::ThreadResume {
+                request_id: RequestId::String("recovery-terminal-resume".into()),
+                params: ThreadResumeParams {
+                    thread_id: actual.identity.thread_id.clone(),
+                    exclude_turns: paginated,
+                    ..Default::default()
+                },
+            })
+            .await;
+        let value = response
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("actual resume transport failed: {error}"))?
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("actual resume rejected: {error:?}"))?;
+        if !paginated {
+            assert!(
+                value["thread"]["turns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|turn| turn["id"] == actual.identity.turn_id
+                        && matches!(
+                            turn["status"].as_str(),
+                            Some("completed" | "interrupted" | "failed")
+                        )),
+                "actual resume omitted the exact terminal turn"
+            );
+        }
+        current
+            .response("thread/resume", &response, lease.as_ref())
+            .await?;
+        drop(lease);
+        if paginated {
+            assert_eq!(
+                current
+                    .inner
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .active
+                    .get(&actual.identity.thread_id),
+                Some(&actual.identity.turn_id),
+                "metadata-only resume must retain unknown turn state"
+            );
+            let lease = current.begin_execution("thread/turns/list", Some(&params));
+            let page = actual
+                .client
+                .request(ClientRequest::ThreadTurnsList {
+                    request_id: RequestId::String("recovery-terminal-page".into()),
+                    params: codex_app_server_protocol::ThreadTurnsListParams {
+                        thread_id: actual.identity.thread_id.clone(),
+                        cursor: None,
+                        limit: Some(10),
+                        sort_direction: None,
+                        items_view: None,
+                    },
+                })
+                .await;
+            let value = page
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("actual terminal page transport failed: {error}"))?
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("actual terminal page rejected: {error:?}"))?;
+            assert!(
+                value["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|turn| turn["id"] == actual.identity.turn_id
+                        && matches!(
+                            turn["status"].as_str(),
+                            Some("completed" | "interrupted" | "failed")
+                        )),
+                "actual page omitted the exact terminal turn"
+            );
+            current
+                .response("thread/turns/list", &page, lease.as_ref())
+                .await?;
+        }
+        until(|| {
+            current
+                .status()
+                .calls
+                .first()
+                .is_some_and(|call| call.state == CallbackState::Acknowledged)
+        })
+        .await;
+        assert_eq!(current.status().calls[0].execution_count, 1);
+        assert!(current.status().calls[0].reaped);
+        let result = tokio::time::timeout(Duration::from_secs(3), current.drain()).await;
+        // Preserve the observed result, then finish fixture teardown even on RED.
+        current.inner.turns.lock().unwrap().completed(
+            actual.identity.thread_id.clone(),
+            actual.identity.turn_id.clone(),
+        );
+        current.drain().await?;
+        drop(current);
+        drop(attachment);
+        drop(retained);
+        drop(proxy);
+        tokio::time::timeout(Duration::from_secs(3), proxy_task).await??;
+        actual.shutdown().await?;
+        assert!(
+            result.is_ok(),
+            "verified same-generation resume failed to reconcile a missed terminal notification; drain remained HOLD"
+        );
+        result.unwrap()?;
+        Ok(())
     }
 }
