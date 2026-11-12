@@ -99,16 +99,23 @@ mod sovereign_transport_timeout {
     use super::super::OwnedCodeModeHost;
     use super::super::ProcessOwnedCodeModeSession;
     use crate::NoopCodeModeSessionDelegate;
-    use codex_code_mode_protocol::{
-        CodeModeSessionOptions, ExecuteRequest, RuntimeResponse, WaitRequest,
-    };
-    use serde_json::{Value, json};
+    use codex_code_mode_protocol::CodeModeSessionOptions;
+    use codex_code_mode_protocol::ExecuteRequest;
+    use codex_code_mode_protocol::RuntimeResponse;
+    use codex_code_mode_protocol::WaitRequest;
+    use serde_json::Value;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::process::Stdio;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tokio::io::{AsyncBufReadExt, BufReader, Lines};
-    use tokio::process::{Child, ChildStdout, Command};
+    use std::time::Duration;
+    use std::time::Instant;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::io::BufReader;
+    use tokio::io::Lines;
+    use tokio::process::Child;
+    use tokio::process::ChildStdout;
+    use tokio::process::Command;
 
     // The observer only sends SIGSTOP through the pinned pidfd. Production timeout
     // handling must kill/reap the helper; the observer never sends a kill signal.

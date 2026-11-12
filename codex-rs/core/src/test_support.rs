@@ -784,7 +784,8 @@ pub async fn sovereign_start_cancellation_for_test(
     thread: &crate::CodexThread,
 ) -> anyhow::Result<SovereignCancellationProbe> {
     use crate::tools::context::ToolPayload;
-    use crate::tools::router::{ToolCall, ToolCallSource};
+    use crate::tools::router::ToolCall;
+    use crate::tools::router::ToolCallSource;
     use tokio_util::sync::CancellationToken;
     let turn = thread.session.new_default_turn().await;
     anyhow::ensure!(
@@ -888,7 +889,8 @@ pub async fn sovereign_start_callback_cancellation_for_test(
     abort_observer: Arc<dyn Fn() + Send + Sync>,
 ) -> anyhow::Result<SovereignCancellationProbe> {
     use crate::tools::context::ToolPayload;
-    use crate::tools::router::{ToolCall, ToolCallSource};
+    use crate::tools::router::ToolCall;
+    use crate::tools::router::ToolCallSource;
     use tokio_util::sync::CancellationToken;
     let turn = thread.session.new_default_turn().await;
     anyhow::ensure!(
@@ -1038,7 +1040,10 @@ pub async fn sovereign_replay_cancelled_cell_for_test(
     cancelled_cell_id: &str,
     replacement: &SovereignCancellationProbe,
 ) -> anyhow::Result<serde_json::Value> {
-    use codex_code_mode::{CellId, RuntimeResponse, WaitOutcome, WaitRequest};
+    use codex_code_mode::CellId;
+    use codex_code_mode::RuntimeResponse;
+    use codex_code_mode::WaitOutcome;
+    use codex_code_mode::WaitRequest;
     use serde_json::json;
     let old_id = CellId::new(cancelled_cell_id.to_owned());
     anyhow::ensure!(

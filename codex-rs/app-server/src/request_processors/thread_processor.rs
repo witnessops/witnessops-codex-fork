@@ -114,9 +114,9 @@ async fn sovereign_check_running_thread(
 }
 
 fn sovereign_fixed_read_head_tool() -> Vec<DynamicToolSpec> {
-    use codex_protocol::dynamic_tools::{
-        DynamicToolFunctionSpec, DynamicToolNamespaceSpec, DynamicToolNamespaceTool,
-    };
+    use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+    use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+    use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
     vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
         name: "witnessops".into(),
         description: "Fixed read-only supervisor tool".into(),

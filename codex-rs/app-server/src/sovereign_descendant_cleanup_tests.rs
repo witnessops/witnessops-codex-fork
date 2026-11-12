@@ -163,10 +163,14 @@ pub(super) async fn probe(
     thread_id: &str,
     timeout_case: bool,
 ) -> Result<()> {
-    use codex_core::exec::{ExecCapturePolicy, ExecExpiration, ExecParams, process_exec_tool_call};
+    use codex_core::exec::ExecCapturePolicy;
+    use codex_core::exec::ExecExpiration;
+    use codex_core::exec::ExecParams;
+    use codex_core::exec::process_exec_tool_call;
     use codex_core::sandboxing::SandboxPermissions;
     use codex_protocol::config_types::WindowsSandboxLevel;
-    use codex_protocol::error::{CodexErrorDetails, SandboxErr};
+    use codex_protocol::error::CodexErrorDetails;
+    use codex_protocol::error::SandboxErr;
 
     anyhow::ensure!(!snapshot.full_access, "unexpected full access");
     let nonce = uuid::Uuid::now_v7().to_string();
@@ -398,7 +402,10 @@ pub(super) async fn start_callback_worker(
     nonce: String,
     detached: bool,
 ) -> Result<CallbackWorker> {
-    use codex_core::exec::{ExecCapturePolicy, ExecExpiration, ExecParams, process_exec_tool_call};
+    use codex_core::exec::ExecCapturePolicy;
+    use codex_core::exec::ExecExpiration;
+    use codex_core::exec::ExecParams;
+    use codex_core::exec::process_exec_tool_call;
     use codex_core::sandboxing::SandboxPermissions;
     use codex_protocol::config_types::WindowsSandboxLevel;
     anyhow::ensure!(!snapshot.full_access, "unexpected full access");

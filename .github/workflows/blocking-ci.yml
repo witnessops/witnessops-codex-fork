@@ -11,11 +11,13 @@ permissions:
   contents: read
 
 jobs:
-  # Run all seven validation families on standard hosted runners.
-  # The required gate continues to reject skipped or failed families.
+  # WitnessOps recovery PRs temporarily run only the small repair checks.
+  # Advisory remediation, MSVC acknowledgement and full build capacity remain
+  # unresolved. Keep all seven needs below: the required gate must stay red.
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Bazel
     uses: ./.github/workflows/bazel.yml
 
@@ -24,6 +26,7 @@ jobs:
     uses: ./.github/workflows/blob-size-policy.yml
 
   cargo-deny:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: cargo-deny
     uses: ./.github/workflows/cargo-deny.yml
 
@@ -36,10 +39,12 @@ jobs:
     uses: ./.github/workflows/repo-checks.yml
 
   rust-ci:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
 
   sdk:
+    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: sdk
     uses: ./.github/workflows/sdk.yml
 
