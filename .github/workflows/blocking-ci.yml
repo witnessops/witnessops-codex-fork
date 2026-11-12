@@ -7,52 +7,41 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  # WitnessOps PRs use bounded static checks; full validation stays blocked.
-  # The existing required gate rejects skipped families, so this is not full CI.
+  # Run all seven validation families on standard hosted runners.
+  # The required gate continues to reject skipped or failed families.
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Bazel
     uses: ./.github/workflows/bazel.yml
-    secrets: inherit
 
   blob-size-policy:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Blob size policy
     uses: ./.github/workflows/blob-size-policy.yml
-    secrets: inherit
 
   cargo-deny:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: cargo-deny
     uses: ./.github/workflows/cargo-deny.yml
-    secrets: inherit
 
   codespell:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: Codespell
     uses: ./.github/workflows/codespell.yml
-    secrets: inherit
 
   repo-checks:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: repo-checks
     uses: ./.github/workflows/repo-checks.yml
-    secrets: inherit
 
   rust-ci:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
-    secrets: inherit
 
   sdk:
-    if: ${{ github.repository != 'witnessops/witnessops-codex-fork' || github.event_name != 'pull_request' }}
     name: sdk
     uses: ./.github/workflows/sdk.yml
-    secrets: inherit
 
   witnessops-static:
     name: WitnessOps lightweight source checks (not full CI)

@@ -26,9 +26,9 @@ jobs:
       matrix:
         include:
           # macOS
-          - os: macos-15-xlarge
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-15-xlarge
+          - os: macos-15
             target: x86_64-apple-darwin
 
           # Linux
@@ -47,9 +47,6 @@ jobs:
 
     # Configure a human readable name for each job
     name: Bazel test on ${{ matrix.os }} for ${{ matrix.target }}
-    environment:
-      name: bazel
-      deployment: false
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -73,7 +70,7 @@ jobs:
       - name: Check MODULE.bazel.lock is up to date
         if: matrix.os == 'ubuntu-24.04' && matrix.target == 'x86_64-unknown-linux-gnu'
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: ./scripts/check-module-bazel-lock.sh
 
@@ -87,7 +84,7 @@ jobs:
 
       - name: bazel test //...
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           bazel_targets=(
@@ -151,13 +148,8 @@ jobs:
           - 2
           - 3
           - 4
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-windows-x64
-    name: Bazel test on windows-latest for x86_64-pc-windows-gnullvm shard ${{ matrix.shard }}/4
-    environment:
-      name: bazel
-      deployment: false
+    runs-on: windows-2025
+    name: Bazel test on windows-2025 for x86_64-pc-windows-gnullvm shard ${{ matrix.shard }}/4
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -188,7 +180,7 @@ jobs:
         env:
           BAZEL_TEST_SHARD: ${{ matrix.shard }}
           BAZEL_TEST_SHARD_COUNT: 4
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           set -euo pipefail
@@ -241,12 +233,13 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   test-windows:
+    timeout-minutes: 5
     # Preserve the existing required-check surface while the real work happens
     # in the sharded Windows jobs above.
     if: always()
     needs: test-windows-shard
     runs-on: ubuntu-24.04
-    name: Bazel test on windows-latest for x86_64-pc-windows-gnullvm
+    name: Bazel test on windows-2025 for x86_64-pc-windows-gnullvm
 
     steps:
       - name: Confirm Windows Bazel test shards passed
@@ -263,13 +256,8 @@ jobs:
     # it a larger timeout. Also allow manual runs for native toolchain changes.
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     timeout-minutes: 40
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-windows-x64
-    name: Bazel test on windows-latest for x86_64-pc-windows-msvc (native main)
-    environment:
-      name: bazel
-      deployment: false
+    runs-on: windows-2025
+    name: Bazel test on windows-2025 for x86_64-pc-windows-msvc (native main)
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -285,7 +273,7 @@ jobs:
 
       - name: bazel test //...
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           bazel_targets=(
@@ -351,18 +339,12 @@ jobs:
           # that the Bazel test job uses.
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: macos-15-xlarge
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-latest
+          - os: windows-2025
             target: x86_64-pc-windows-gnullvm
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
-    runs-on: ${{ matrix.runs_on || matrix.os }}
+    runs-on: ${{ matrix.os }}
     name: Bazel clippy on ${{ matrix.os }} for ${{ matrix.target }}
-    environment:
-      name: bazel
-      deployment: false
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -386,7 +368,7 @@ jobs:
 
       - name: bazel build --config=clippy lint targets
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           bazel_clippy_args=(
@@ -458,18 +440,12 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: macos-15-xlarge
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-latest
+          - os: windows-2025
             target: x86_64-pc-windows-gnullvm
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
-    runs-on: ${{ matrix.runs_on || matrix.os }}
+    runs-on: ${{ matrix.os }}
     name: Verify release build on ${{ matrix.os }} for ${{ matrix.target }}
-    environment:
-      name: bazel
-      deployment: false
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -493,7 +469,7 @@ jobs:
 
       - name: bazel build verify-release-build targets
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           # This job exists to compile Rust code behind
@@ -538,7 +514,7 @@ jobs:
       - name: Verify Bazel builds bwrap
         if: runner.os == 'Linux'
         env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_API_KEY: ""
         shell: bash
         run: |
           ./.github/scripts/run-bazel-ci.sh \
