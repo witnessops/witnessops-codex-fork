@@ -570,6 +570,10 @@ struct LogoutCommand {
 
 #[derive(Debug, Parser)]
 struct AppServerCommand {
+    /// Admit only the fixed Sovereign read-only callback workflow.
+    #[arg(long = "sovereign-read-head", default_value_t = false)]
+    sovereign_read_head: bool,
+
     #[command(flatten)]
     startup_config: codex_app_server::StartupConfigArgs,
 
@@ -1067,6 +1071,10 @@ async fn dispatch_cli(
         .clone()
         .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok());
     reject_unsupported_worktree_for_subcommand(interactive.shared.worktree, &subcommand)?;
+    reject_unsupported_sovereign_for_subcommand(
+        interactive.shared.sovereign_read_head,
+        subcommand.as_ref(),
+    )?;
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -1235,6 +1243,7 @@ async fn dispatch_cli(
         }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
+                sovereign_read_head,
                 startup_config,
                 cloud_skills_snapshot,
                 subcommand,
@@ -1247,6 +1256,12 @@ async fn dispatch_cli(
                 analytics_default_enabled,
                 auth,
             } = app_server_cli;
+            let sovereign_read_head = sovereign_read_head || interactive.shared.sovereign_read_head;
+            anyhow::ensure!(
+                !sovereign_read_head
+                    || (subcommand.is_none() && !managed_daemon && !remote_control),
+                "Sovereign read-head mode requires an explicit foreground server; daemon and remote-control operations are not admitted"
+            );
             let strict_config = app_server_strict_config || root_strict_config;
             reject_strict_config_for_app_server_subcommand(strict_config, subcommand.as_ref())?;
             reject_remote_mode_for_app_server_subcommand(
@@ -1286,11 +1301,18 @@ async fn dispatch_cli(
                         let _ = codex_app_server_daemon::maintain_stderr_log();
                     }
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        dynamic_tool_owner_mode: if sovereign_read_head {
+                            codex_app_server::DynamicToolOwnerMode::SovereignReadHead
+                        } else {
+                            codex_app_server::DynamicToolOwnerMode::Normal
+                        },
                         cloud_skills_snapshot,
                         code_mode_host_transport: code_mode_host.into(),
                         managed_daemon,
-                        remote_control_startup_mode: match (remote_control, remote_control_disabled)
-                        {
+                        remote_control_startup_mode: match (
+                            remote_control,
+                            remote_control_disabled || sovereign_read_head,
+                        ) {
                             (true, _) => {
                                 codex_app_server::RemoteControlStartupMode::EnabledEphemeral
                             }
@@ -2244,6 +2266,28 @@ fn prepend_config_flags(
     subcommand_config_overrides.prepend_root_overrides(cli_config_overrides);
 }
 
+fn reject_unsupported_sovereign_for_subcommand(
+    selected: bool,
+    subcommand: Option<&Subcommand>,
+) -> anyhow::Result<()> {
+    if !selected {
+        return Ok(());
+    }
+    let supported = match subcommand {
+        None
+        | Some(Subcommand::Exec(_))
+        | Some(Subcommand::Resume(_))
+        | Some(Subcommand::Fork(_)) => true,
+        Some(Subcommand::AppServer(server)) => server.subcommand.is_none(),
+        _ => false,
+    };
+    anyhow::ensure!(
+        supported,
+        "--sovereign-read-head supports interactive sessions, exec, resume, fork and foreground app-server only"
+    );
+    Ok(())
+}
+
 fn reject_remote_mode_for_subcommand(
     remote: Option<&str>,
     remote_auth_token_env: Option<&str>,
@@ -2788,6 +2832,54 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn sovereign_cli_admission_defaults_off_and_survives_session_commands() {
+        let ordinary = MultitoolCli::try_parse_from(["codex"]).expect("ordinary CLI");
+        assert!(!ordinary.interactive.shared.sovereign_read_head);
+        for args in [
+            ["codex", "--sovereign-read-head", "exec"],
+            ["codex", "exec", "--sovereign-read-head"],
+        ] {
+            assert!(finalize_exec_from_args(&args).shared.sovereign_read_head);
+        }
+        assert!(
+            finalize_resume_from_args(&["codex", "resume", "--sovereign-read-head"])
+                .shared
+                .sovereign_read_head
+        );
+        assert!(
+            finalize_fork_from_args(&["codex", "--sovereign-read-head", "fork"])
+                .shared
+                .sovereign_read_head
+        );
+        let server = app_server_from_args(&["codex", "app-server", "--sovereign-read-head"]);
+        assert!(server.sovereign_read_head);
+    }
+
+    #[test]
+    fn sovereign_cli_admission_rejects_unrelated_or_background_commands() {
+        for args in [
+            vec!["codex", "--sovereign-read-head", "login"],
+            vec![
+                "codex",
+                "--sovereign-read-head",
+                "app-server",
+                "daemon",
+                "start",
+            ],
+            vec!["codex", "--sovereign-read-head", "review"],
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).expect("parse command");
+            assert!(
+                reject_unsupported_sovereign_for_subcommand(
+                    cli.interactive.shared.sovereign_read_head,
+                    cli.subcommand.as_ref(),
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn interactive_tui_future_stays_bounded() {

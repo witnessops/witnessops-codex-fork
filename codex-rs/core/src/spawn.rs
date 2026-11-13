@@ -28,6 +28,8 @@ pub const CODEX_SANDBOX_ENV_VAR: &str = "CODEX_SANDBOX";
 #[derive(Debug, Clone, Copy)]
 pub enum StdioPolicy {
     RedirectForShellTool,
+    /// Host-owned stdin pipe controls an isolated Linux PID namespace.
+    RedirectForSandboxControl,
     Inherit,
 }
 
@@ -68,7 +70,7 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
     );
 
     let mut cmd = match stdio_policy {
-        StdioPolicy::RedirectForShellTool => {
+        StdioPolicy::RedirectForShellTool | StdioPolicy::RedirectForSandboxControl => {
             Command::from(codex_utils_process::background_command(&program))
         }
         StdioPolicy::Inherit => Command::new(&program),
@@ -93,7 +95,10 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
 
     #[cfg(unix)]
     unsafe {
-        let detach_from_tty = matches!(stdio_policy, StdioPolicy::RedirectForShellTool);
+        let detach_from_tty = matches!(
+            stdio_policy,
+            StdioPolicy::RedirectForShellTool | StdioPolicy::RedirectForSandboxControl
+        );
         #[cfg(target_os = "linux")]
         let parent_pid = libc::getpid();
         cmd.pre_exec(move || {
@@ -116,12 +121,19 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
     }
 
     match stdio_policy {
-        StdioPolicy::RedirectForShellTool => {
-            // Do not create a file descriptor for stdin because otherwise some
+        StdioPolicy::RedirectForShellTool | StdioPolicy::RedirectForSandboxControl => {
+            // Ordinary commands get /dev/null. The trusted sandbox helper consumes
+            // its control pipe and gives the actual command /dev/null too. Some
             // commands may hang forever waiting for input. For example, ripgrep has
             // a heuristic where it may try to read from stdin as explained here:
             // https://github.com/BurntSushi/ripgrep/blob/e2362d4d5185d02fa857bf381e7bd52e66fafc73/crates/core/flags/hiargs.rs#L1101-L1103
-            cmd.stdin(Stdio::null());
+            cmd.stdin(
+                if matches!(stdio_policy, StdioPolicy::RedirectForSandboxControl) {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                },
+            );
 
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         }

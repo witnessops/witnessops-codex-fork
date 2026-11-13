@@ -67,6 +67,10 @@
     }
   },
   "properties": {
+    "cleanupComplete": {
+      "description": "After cancellation, true acknowledges that all callback effects and child processes have stopped and cleanup/reaping has completed. Missing/false, malformed responses and transport errors do not release turn teardown.",
+      "type": "boolean"
+    },
     "contentItems": {
       "items": {
         "$ref": "#/definitions/DynamicToolCallOutputContentItem"

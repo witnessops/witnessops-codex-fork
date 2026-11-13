@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "DynamicToolCleanupIdentity": {
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "requestId": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "callId",
+        "capability",
+        "requestId",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "format": "int64",
+          "type": "integer"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "identity": {
+      "$ref": "#/definitions/DynamicToolCleanupIdentity"
+    }
+  },
+  "required": [
+    "identity"
+  ],
+  "title": "DynamicToolCleanupReadParams",
+  "type": "object"
+}

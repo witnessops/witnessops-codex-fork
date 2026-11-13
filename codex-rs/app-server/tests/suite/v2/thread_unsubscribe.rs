@@ -344,9 +344,12 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running(
         ServerRequest::DynamicToolCall { request_id, params } => (request_id, params),
         other => panic!("expected DynamicToolCall request, got {other:?}"),
     };
+    // Ordinary sessions do not receive owner-only cleanup capabilities.
+    assert!(params.cleanup_token.is_none());
     assert_eq!(
         params,
         DynamicToolCallParams {
+            cleanup_token: None,
             thread_id: thread_id.clone(),
             turn_id: started.turn_id,
             call_id: call_id.to_string(),
@@ -373,7 +376,9 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running(
     let closed_while_tool_call_blocked = closed_while_tool_call_blocked.await;
     assert!(closed_while_tool_call_blocked.is_err());
 
+    // The deterministic wait is owned by this fixture; it launched no external work.
     let response = DynamicToolCallResponse {
+        cleanup_complete: true,
         content_items: vec![DynamicToolCallOutputContentItem::InputText {
             text: "dynamic-ok".to_string(),
         }],

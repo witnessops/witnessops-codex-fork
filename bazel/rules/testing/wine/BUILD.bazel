@@ -42,8 +42,10 @@ rust_binary(
 
 wine_rust_test(
     name = "wine-test-support-unit-tests",
-    timeout = "short",
+    # Fresh Wine prefixes and .NET startup must not compete with compilation.
+    timeout = "moderate",
     crate = ":wine_test_support",
+    tags = ["exclusive-if-local"],
     windows_binaries = {
         "wine-smoke": ":windows-smoke",
     },

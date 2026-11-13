@@ -183,6 +183,8 @@ impl AppServerSession {
         }
         if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client {
             self.thread_tool_transport()
+                .configure_permission_selection(&mut params.permissions, &mut params.sandbox);
+            self.thread_tool_transport()
                 .configure_mcp(&mut params.config);
         }
         let paginated = self.history_support == ThreadHistorySupport::Paginated;

@@ -16,6 +16,7 @@ use codex_app_server_protocol::DynamicToolCallOutputContentItem;
 use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::DynamicToolNamespaceTool;
 use codex_app_server_protocol::DynamicToolSpec;
+use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_config::McpServerConfig;
@@ -55,6 +56,7 @@ use uuid::Uuid;
 pub(crate) enum ThreadToolTransport {
     Dynamic,
     Mcp(Arc<DynamicToolMcpServer>),
+    Sovereign(codex_app_server_client::sovereign_callback::SovereignCallbackSupervisor),
 }
 
 impl ThreadToolTransport {
@@ -62,6 +64,9 @@ impl ThreadToolTransport {
         &self,
         config: &crate::legacy_core::config::Config,
     ) -> std::io::Result<()> {
+        if matches!(self, Self::Sovereign(_)) {
+            validate_sovereign_config(config)?;
+        }
         if matches!(self, Self::Mcp(_))
             && config
                 .mcp_servers
@@ -78,6 +83,15 @@ impl ThreadToolTransport {
 
     pub(crate) fn configure(&self, params: &mut ThreadStartParams) {
         match self {
+            Self::Sovereign(_) => {
+                // Only the immutable owner-mode server defines this bounded tool.
+                params.dynamic_tools = None;
+                preserve_sovereign_permission_selection(
+                    &mut params.permissions,
+                    &mut params.sandbox,
+                    /*include_omitted*/ true,
+                );
+            }
             Self::Dynamic => {
                 params.dynamic_tools = Some(dynamic_tools::non_delegation_tool_specs());
             }
@@ -88,6 +102,21 @@ impl ThreadToolTransport {
         }
     }
 
+    pub(crate) fn configure_permission_selection(
+        &self,
+        permissions: &mut Option<String>,
+        sandbox: &mut Option<SandboxMode>,
+    ) {
+        if matches!(self, Self::Sovereign(_)) {
+            // Preserve an omitted selection on cleanup-only resume/inherited fork.
+            preserve_sovereign_permission_selection(
+                permissions,
+                sandbox,
+                /*include_omitted*/ false,
+            );
+        }
+    }
+
     pub(crate) fn configure_mcp(&self, config: &mut Option<HashMap<String, Value>>) {
         if let Self::Mcp(server) = self {
             config.get_or_insert_default().insert(
@@ -95,6 +124,45 @@ impl ThreadToolTransport {
                 server.config.clone(),
             );
         }
+    }
+}
+
+pub(crate) fn validate_sovereign_config(
+    config: &crate::legacy_core::config::Config,
+) -> std::io::Result<()> {
+    let active = config.permissions.active_permission_profile();
+    if config.model.as_deref() != Some("gpt-5.6-terra")
+        || config.cwd.as_path()
+            != std::path::Path::new("/home/karol/WitnessOps/WitnessOps/repos/witnessops-codex-ops")
+        || !config.explicit_permission_profile_mode
+        || !matches!(active.as_ref(), Some(profile)
+            if profile.id == "wops-codex-ops-read" && profile.extends.as_deref() == Some(":read-only"))
+        || !matches!(
+            config.permissions.effective_permission_profile(),
+            codex_protocol::models::PermissionProfile::Managed { .. }
+        )
+    {
+        return Err(std::io::Error::other(
+            "--sovereign-read-head requires the fixed local owner workspace, Terra model, and named managed read-only profile",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn preserve_sovereign_permission_selection(
+    permissions: &mut Option<String>,
+    sandbox: &mut Option<SandboxMode>,
+    include_omitted: bool,
+) {
+    // Ordinary remote clients deliberately project named profiles into legacy
+    // sandbox modes. The verified owner server requires this exact profile ID.
+    // Leave incompatible explicit selections intact so the server rejects them.
+    if (include_omitted || sandbox.is_some())
+        && permissions.is_none()
+        && matches!(sandbox, None | Some(SandboxMode::ReadOnly))
+    {
+        *permissions = Some("wops-codex-ops-read".to_string());
+        *sandbox = None;
     }
 }
 
@@ -305,6 +373,7 @@ impl ServerHandler for DynamicToolMcpHandler {
             .and_then(Value::as_str)
             .map_or_else(|| format!("mcp-call-{}", Uuid::new_v4()), str::to_string);
         let params = DynamicToolCallParams {
+            cleanup_token: None,
             thread_id: thread_id.to_string(),
             turn_id,
             call_id,

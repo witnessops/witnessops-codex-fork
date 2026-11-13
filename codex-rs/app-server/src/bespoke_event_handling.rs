@@ -1111,6 +1111,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             let dynamic_tool_call_params = match &event.item {
                 CoreTurnItem::DynamicToolCall(item) => Some(DynamicToolCallParams {
+                    cleanup_token: None,
                     thread_id: conversation_id.to_string(),
                     turn_id: event.turn_id.clone(),
                     call_id: item.id.clone(),
@@ -1133,11 +1134,13 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
             if let Some(params) = dynamic_tool_call_params {
                 let call_id = params.call_id.clone();
+                let turn_id = params.turn_id.clone();
                 let (_pending_request_id, rx) = outgoing
-                    .send_request(ServerRequestPayload::DynamicToolCall(params))
+                    .send_dynamic_tool_request(params, Arc::clone(&conversation))
                     .await;
                 tokio::spawn(async move {
-                    crate::dynamic_tools::on_call_response(call_id, rx, conversation).await;
+                    crate::dynamic_tools::on_call_response(turn_id, call_id, rx, conversation)
+                        .await;
                 });
             }
         }
@@ -3459,6 +3462,7 @@ mod tests {
         assert_eq!(
             params,
             DynamicToolCallParams {
+                cleanup_token: None,
                 thread_id: conversation_id.to_string(),
                 turn_id: "turn-1".to_string(),
                 call_id: "dynamic-1".to_string(),

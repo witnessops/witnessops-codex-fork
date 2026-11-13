@@ -120,6 +120,10 @@ pub struct LinuxSandboxCommand {
     #[arg(long = "inherit-pid-namespace", hide = true)]
     pub inherit_pid_namespace: bool,
 
+    /// Host-owned stdin lifetime pipe; the command still receives /dev/null.
+    #[arg(long = "control-stdin", hide = true)]
+    pub control_stdin: bool,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -144,6 +148,7 @@ pub fn run_main() -> ! {
         verify_fd_mounts,
         no_proc,
         inherit_pid_namespace,
+        control_stdin,
         command,
     } = LinuxSandboxCommand::parse();
     let allow_network_for_proxy = managed_network.is_some();
@@ -155,6 +160,9 @@ pub fn run_main() -> ! {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
     }
     ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
+    if control_stdin && (inherit_pid_namespace || use_legacy_landlock) {
+        panic!("stdin lifetime control requires an isolated bubblewrap PID namespace");
+    }
     let EffectivePermissions {
         permission_profile,
         file_system_sandbox_policy,
@@ -212,6 +220,22 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
 
+        if control_stdin {
+            assert_eq!(
+                unsafe { libc::getpid() },
+                1,
+                "lifetime controller must be namespace init"
+            );
+            let mut pollfd = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // Do not launch work if its host already closed the control pipe.
+            if unsafe { libc::poll(&mut pollfd, 1, 0) } != 0 {
+                unsafe { libc::_exit(137) };
+            }
+        }
         let signal_mask = ForwardedSignalMask::block();
         let command_pid = unsafe { libc::fork() };
         if command_pid < 0 {
@@ -220,11 +244,44 @@ pub fn run_main() -> ! {
         }
 
         if command_pid == 0 {
+            if control_stdin {
+                let null =
+                    File::open("/dev/null").unwrap_or_else(|err| panic!("command stdin: {err}"));
+                if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
+                    panic!(
+                        "failed to detach command from lifetime pipe: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
             reset_forwarded_signal_handlers_to_default();
             signal_mask.restore();
             exec_or_panic(command);
         }
 
+        if control_stdin {
+            // Start only after fork. EOF means host cancellation, timeout, or death.
+            // Exiting PID 1 makes the kernel kill and reap the entire namespace,
+            // including descendants that create separate process groups.
+            std::thread::Builder::new()
+                .name("sandbox-lifetime".into())
+                .spawn(|| {
+                    let mut byte = 0_u8;
+                    loop {
+                        let result = unsafe {
+                            libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1)
+                        };
+                        if result < 0
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                        {
+                            continue;
+                        }
+                        // Unexpected input/errors also fail closed; this is not command stdin.
+                        unsafe { libc::_exit(137) };
+                    }
+                })
+                .unwrap_or_else(|err| panic!("failed to start sandbox lifetime controller: {err}"));
+        }
         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
         signal_mask.restore();
         loop {
@@ -248,6 +305,7 @@ pub fn run_main() -> ! {
     }
 
     if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
+        assert!(!control_stdin, "stdin lifetime control requires bubblewrap");
         if let Err(e) = apply_permission_profile_to_current_thread(
             &permission_profile,
             &sandbox_policy_cwd,
@@ -297,7 +355,7 @@ pub fn run_main() -> ! {
             crate::wslg::ensure_supported_path(&executable)
                 .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
         }
-        let inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
+        let mut inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
             sandbox_policy_cwd: &sandbox_policy_cwd,
             command_cwd: command_cwd.as_deref(),
             permission_profile: &permission_profile,
@@ -305,6 +363,9 @@ pub fn run_main() -> ! {
             proxy_route_spec,
             command,
         });
+        if control_stdin {
+            inner.insert(1, "--control-stdin".to_string());
+        }
         run_bwrap_with_proc_fallback(
             &sandbox_policy_cwd,
             command_cwd.as_deref(),

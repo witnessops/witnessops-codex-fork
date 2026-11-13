@@ -68,6 +68,29 @@ mod tests {
     use codex_protocol::protocol::SessionSource;
 
     #[tokio::test]
+    async fn persisted_owner_marker_survives_supplied_resume_history() {
+        let store = InMemoryThreadStore::default();
+        let id = ThreadId::new();
+        let mut create = create_thread_params(id, ThreadHistoryMode::Legacy);
+        create.sovereign_read_head = true;
+        let metadata = create.metadata.clone();
+        store.create_thread(create).await.unwrap();
+        let history = store
+            .resume_thread(ResumeThreadParams {
+                thread_id: id,
+                rollout_path: None,
+                history: Some(Arc::new(Vec::new())),
+                history_revision: None,
+                include_archived: true,
+                metadata,
+            })
+            .await
+            .unwrap();
+        assert!(history.iter().any(|item| matches!(item,
+            RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)));
+    }
+
+    #[tokio::test]
     async fn deletion_cleans_associated_sqlite_and_shared_memory()
     -> Result<(), Box<dyn std::error::Error>> {
         use codex_utils_absolute_path::test_support::PathExt;
@@ -166,6 +189,7 @@ mod tests {
         ] {
             store
                 .create_thread(CreateThreadParams {
+                    sovereign_read_head: false,
                     attached_thread: false,
                     creator_user_id: None,
                     creator_account_id: None,
@@ -443,6 +467,7 @@ mod tests {
         history_mode: ThreadHistoryMode,
     ) -> CreateThreadParams {
         CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -585,6 +610,7 @@ impl InMemoryThreadStore {
         let mut state = self.state.lock().await;
         state.calls.create_thread += 1;
         let session_meta = SessionMeta {
+            sovereign_read_head: params.sovereign_read_head,
             attached_thread: params.attached_thread,
             session_id: params.session_id,
             id: params.thread_id,
@@ -634,6 +660,15 @@ impl InMemoryThreadStore {
     ) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
         let mut state = self.state.lock().await;
         state.calls.resume_thread += 1;
+        let owner_meta = state.histories.get(&params.thread_id).and_then(|history| {
+            history
+                .iter()
+                .find(|item| {
+                    matches!(item,
+                RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+                })
+                .cloned()
+        });
         if let Some(history) = params.history {
             if matches!(
                 history.first(),
@@ -650,6 +685,15 @@ impl InMemoryThreadStore {
             }
         } else {
             state.histories.entry(params.thread_id).or_default();
+        }
+        if let Some(owner_meta) = owner_meta {
+            let history = state.histories.entry(params.thread_id).or_default();
+            if !history.iter().any(|item| {
+                matches!(item,
+                RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+            }) {
+                history.insert(0, owner_meta);
+            }
         }
         if let Some(rollout_path) = params.rollout_path {
             state.rollout_paths.insert(rollout_path, params.thread_id);

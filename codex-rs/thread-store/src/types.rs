@@ -72,6 +72,9 @@ pub struct ExtraConfig {}
 /// Parameters required to create a persisted thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateThreadParams {
+    /// Host-owned restriction persisted at creation; never inferred from history.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sovereign_read_head: bool,
     /// ChatGPT user that created this thread; absent when unavailable or for older threads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_user_id: Option<String>,

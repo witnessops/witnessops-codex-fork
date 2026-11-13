@@ -69,7 +69,23 @@ pub(super) async fn reconnect(
         let attempt = async {
             tokio::time::sleep(Duration::from_secs(delay)).await;
             stage = "connecting to the server";
-            let client = crate::app_server_connection::connect(&target).await?;
+            let mut client = crate::app_server_connection::connect(&target).await?;
+            if let ThreadToolTransport::Sovereign(supervisor) = &task_tools {
+                // Retain the original owner and its cleanup outbox across connection replacement.
+                // Recovery precedes resume, which may be waiting on the original turn's cleanup.
+                if let Err(error) = client
+                    .reattach_sovereign_read_head(supervisor.clone())
+                    .await
+                {
+                    let _ = client.shutdown().await;
+                    return Err(error.into());
+                }
+            } else if client.server_supports_sovereign_read_head() {
+                let _ = client.shutdown().await;
+                color_eyre::eyre::bail!(
+                    "reconnected server requires explicit --sovereign-read-head"
+                );
+            }
             let mut session = AppServerSession::new(backend_id, client, mode)
                 .with_local_codex_home(&config.codex_home)
                 .with_remote_cwd_override(remote_cwd.clone())

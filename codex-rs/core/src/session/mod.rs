@@ -1,3 +1,4 @@
+pub(crate) mod dynamic_tool_cleanup;
 pub(crate) mod startup;
 
 use crate::PromptCacheKey;
@@ -3648,28 +3649,41 @@ impl Session {
         Some((turn_context, settings, environments, strict_auto_review))
     }
 
+    pub async fn notify_dynamic_tool_response(&self, call_id: &str, response: DynamicToolResponse) {
+        self.notify_dynamic_tool_response_for_turn(None, call_id, response, false)
+            .await;
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
+        reason = "callback identity, delivery and cleanup resolution must remain atomic with registration"
     )]
-    pub async fn notify_dynamic_tool_response(&self, call_id: &str, response: DynamicToolResponse) {
-        let entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_dynamic_tool(call_id)
-                }
-                None => None,
-            }
+    pub(crate) async fn notify_dynamic_tool_response_for_turn(
+        &self,
+        expected_turn_id: Option<&str>,
+        call_id: &str,
+        response: DynamicToolResponse,
+        cleanup_complete: bool,
+    ) {
+        let mut active = self.active_turn.lock().await;
+        let entry = match active.as_mut() {
+            Some(at) => at
+                .turn_state
+                .lock()
+                .await
+                .remove_pending_dynamic_tool(call_id, expected_turn_id),
+            None => None,
         };
-        match entry {
-            Some(tx_response) => {
-                tx_response.send(response).ok();
-            }
-            None => {
-                warn!("No pending dynamic tool call found for call_id: {call_id}");
-            }
+        // Use the callback's recorded origin, not the current task ID: a yielded
+        // cell may finish while another turn is active. Hold active_turn until
+        // delivery and cleanup resolution finish so a reused call ID cannot race.
+        if entry.is_some() || (expected_turn_id.is_some() && cleanup_complete) {
+            self.dynamic_tool_cleanup
+                .resolve(expected_turn_id, call_id, cleanup_complete)
+                .await;
+        }
+        if let Some(tx_response) = entry {
+            tx_response.send(response).ok();
         }
     }
 

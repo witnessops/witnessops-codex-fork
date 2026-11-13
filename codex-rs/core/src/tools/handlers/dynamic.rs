@@ -209,8 +209,24 @@ async fn request_dynamic_tool(
         }
         match active.as_mut() {
             Some(at) => {
+                if session
+                    .services
+                    .thread_extension_data
+                    .get::<codex_extension_api::SovereignReadHeadOwner>()
+                    .is_some()
+                    && !session
+                        .dynamic_tool_cleanup
+                        .register(&turn_context.sub_id, &call_id, cancellation_token.clone())
+                        .await
+                {
+                    return None;
+                }
                 let mut ts = at.turn_state.lock().await;
-                ts.insert_pending_dynamic_tool(call_id.clone(), tx_response)
+                ts.insert_pending_dynamic_tool(
+                    call_id.clone(),
+                    turn_context.sub_id.clone(),
+                    tx_response,
+                )
             }
             None => return None,
         }

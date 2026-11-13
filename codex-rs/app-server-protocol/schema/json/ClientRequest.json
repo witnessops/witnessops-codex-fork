@@ -791,6 +791,150 @@
       ],
       "type": "string"
     },
+    "DynamicToolCallOutputContentItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputText"
+              ],
+              "title": "InputTextDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextDynamicToolCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "imageUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputImage"
+              ],
+              "title": "InputImageDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "imageUrl",
+            "type"
+          ],
+          "title": "InputImageDynamicToolCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "audioUrl": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "inputAudio"
+              ],
+              "title": "InputAudioDynamicToolCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audioUrl",
+            "type"
+          ],
+          "title": "InputAudioDynamicToolCallOutputContentItem",
+          "type": "object"
+        }
+      ]
+    },
+    "DynamicToolCallResponse": {
+      "properties": {
+        "cleanupComplete": {
+          "description": "After cancellation, true acknowledges that all callback effects and child processes have stopped and cleanup/reaping has completed. Missing/false, malformed responses and transport errors do not release turn teardown.",
+          "type": "boolean"
+        },
+        "contentItems": {
+          "items": {
+            "$ref": "#/definitions/DynamicToolCallOutputContentItem"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "contentItems",
+        "success"
+      ],
+      "type": "object"
+    },
+    "DynamicToolCleanupAckParams": {
+      "properties": {
+        "identity": {
+          "$ref": "#/definitions/DynamicToolCleanupIdentity"
+        },
+        "response": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DynamicToolCallResponse"
+            }
+          ],
+          "description": "Original result, retained by the owner after verified cleanup. This RPC never executes work."
+        }
+      },
+      "required": [
+        "identity",
+        "response"
+      ],
+      "type": "object"
+    },
+    "DynamicToolCleanupIdentity": {
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "requestId": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "callId",
+        "capability",
+        "requestId",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "DynamicToolCleanupReadParams": {
+      "properties": {
+        "identity": {
+          "$ref": "#/definitions/DynamicToolCleanupIdentity"
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
     "DynamicToolNamespaceTool": {
       "oneOf": [
         {
@@ -6313,6 +6457,56 @@
   },
   "description": "Request from the client to the server.",
   "oneOf": [
+    {
+      "description": "Read cleanup state without replaying a tool operation or entering its turn queue.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "item/tool/cleanup/read"
+          ],
+          "title": "Item/tool/cleanup/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/DynamicToolCleanupReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Item/tool/cleanup/readRequest",
+      "type": "object"
+    },
+    {
+      "description": "Idempotently deliver a verified cleanup result, including after reconnect.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "item/tool/cleanup/ack"
+          ],
+          "title": "Item/tool/cleanup/ackRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/DynamicToolCleanupAckParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Item/tool/cleanup/ackRequest",
+      "type": "object"
+    },
     {
       "properties": {
         "id": {

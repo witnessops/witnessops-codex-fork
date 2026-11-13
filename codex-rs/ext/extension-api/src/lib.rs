@@ -15,6 +15,11 @@ pub use session_isolation::IsolatedSessionExtensions;
 pub use session_isolation::SessionIsolation;
 pub use tool_policy::ToolPolicy;
 
+/// Trusted host admission for the fixed Sovereign read-head callback lifecycle.
+/// Never derive this marker from a tool name, project config or saved metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct SovereignReadHeadOwner;
+
 pub use capabilities::ConversationHistorySnapshot;
 pub use capabilities::ExtensionEventSink;
 pub use capabilities::ExtensionMetrics;

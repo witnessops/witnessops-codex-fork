@@ -418,16 +418,17 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stderr)
             oldest = releases / f"{versions[0]}-{target}"
             helper = oldest / "bin/codex-code-mode-host"
-            shutil.copy("/bin/sleep", helper)
-            if system.sysname == "Darwin":
-                # A copied macOS system binary cannot run with its platform signature.
-                subprocess.run(
-                    ["/usr/bin/codesign", "--force", "--sign", "-", str(helper)],
-                    check=True,
-                    capture_output=True,
-                )
+            # Use a native helper with no host multicall dispatch or platform signature.
+            # Its executable must stay inside the release for /proc and lsof checks.
+            subprocess.run(
+                ["cc", "-x", "c", "-o", str(helper), "-"],
+                input="#include <unistd.h>\nint main(void) { sleep(300); return 0; }\n",
+                text=True,
+                check=True,
+                capture_output=True,
+            )
             # A helper can outlive its parent CLI; retain its whole release.
-            with subprocess.Popen([str(helper), "300"]) as running:
+            with subprocess.Popen([str(helper)]) as running:
                 try:
                     second, _ = run_installer_in(
                         root, versions[1], **install_options[versions[1]]
@@ -542,11 +543,12 @@ class InstallShTest(unittest.TestCase):
                             readable, "installer did not attempt retirement"
                         )
                         self.assertEqual(os.read(ready_fd, 128), b"ready\n")
-                        with subprocess.Popen([str(helper), "300"]) as late_helper:
+                        with subprocess.Popen([str(helper)]) as late_helper:
                             try:
                                 os.write(resume_fd, b"continue\n")
                                 raced, _ = installing.result(timeout=30)
                                 self.assertEqual(raced.returncode, 0, raced.stderr)
+                                self.assertIsNone(late_helper.poll())
                                 self.assertTrue(oldest.is_dir(), raced.stderr)
                                 self.assertEqual(history.read_bytes(), recorded)
                             finally:

@@ -52,6 +52,87 @@ const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
+// Explicit owner mode installs this same fixed ceiling at every new runtime boundary.
+pub(super) fn sovereign_owner_tool_policy(
+    config: &codex_core::config::Config,
+) -> Result<codex_extension_api::ToolPolicy, JSONRPCErrorError> {
+    const MODEL: &str = "gpt-5.6-terra";
+    const PROFILE: &str = "wops-codex-ops-read";
+    const REPO: &str = "/home/karol/WitnessOps/WitnessOps/repos/witnessops-codex-ops";
+    let active = config.permissions.active_permission_profile();
+    if config.model.as_deref() != Some(MODEL)
+        || config.cwd.as_path() != std::path::Path::new(REPO)
+        || !config.explicit_permission_profile_mode
+        || !matches!(active.as_ref(), Some(p)
+            if p.id == PROFILE && p.extends.as_deref() == Some(":read-only"))
+        || !matches!(
+            config.permissions.effective_permission_profile(),
+            codex_protocol::models::PermissionProfile::Managed { .. }
+        )
+    {
+        return Err(invalid_request(
+            "fixed owner model, checkout, and named managed profile required",
+        ));
+    }
+    Ok(codex_extension_api::ToolPolicy {
+        allowed_tools: Some(vec![
+            codex_tools::ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
+            codex_tools::ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
+            codex_tools::ToolName::namespaced("witnessops", "read_head"),
+        ]),
+        require_managed_sandbox: true,
+        require_unified_exec: true,
+        require_code_mode_only: true,
+        expose_additional_permissions: false,
+    })
+}
+
+// Warm resume attaches to an existing runtime rather than starting a new one.
+// Validate the captured ceiling, not mutable extension data or request claims.
+async fn sovereign_check_running_thread(
+    thread: &CodexThread,
+    snapshot: &ThreadConfigSnapshot,
+) -> Result<(), JSONRPCErrorError> {
+    let denied = || invalid_request("running thread does not satisfy the fixed owner policy");
+    let config = thread.config().await;
+    let expected = sovereign_owner_tool_policy(&config).map_err(|_| denied())?;
+    let actual = thread.captured_tool_policy();
+    if actual.allowed_tools != expected.allowed_tools
+        || actual.require_managed_sandbox != expected.require_managed_sandbox
+        || actual.require_unified_exec != expected.require_unified_exec
+        || actual.require_code_mode_only != expected.require_code_mode_only
+        || actual.expose_additional_permissions != expected.expose_additional_permissions
+        || Some(snapshot.model.as_str()) != config.model.as_deref()
+        || snapshot.cwd() != &config.cwd
+        || snapshot.full_access
+        || snapshot.permission_profile != config.permissions.effective_permission_profile()
+        || snapshot.active_permission_profile != config.permissions.active_permission_profile()
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+fn sovereign_fixed_read_head_tool() -> Vec<DynamicToolSpec> {
+    use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+    use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+    use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
+    vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: "witnessops".into(),
+        description: "Fixed read-only supervisor tool".into(),
+        tools: vec![DynamicToolNamespaceTool::Function(
+            DynamicToolFunctionSpec {
+                name: "read_head".into(),
+                description: "Read exactly the pinned Git HEAD; accepts no arguments".into(),
+                input_schema: serde_json::json!({
+                    "type": "object", "properties": {}, "additionalProperties": false
+                }),
+                defer_loading: false,
+            },
+        )],
+    })]
+}
+
 async fn stage_pending_thread_metadata(
     thread_manager: &ThreadManager,
     thread_store: &dyn ThreadStore,
@@ -495,6 +576,7 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
 
 #[derive(Clone)]
 pub(crate) struct ThreadRequestProcessor {
+    pub(crate) dynamic_tool_owner_mode: crate::DynamicToolOwnerMode,
     pub(super) auth_manager: Arc<AuthManager>,
     pub(crate) thread_manager: Arc<ThreadManager>,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
@@ -556,6 +638,7 @@ impl ThreadRequestProcessor {
         sample_responses: Arc<crate::thread_sample::SampleResponseRegistry>,
     ) -> Self {
         Self {
+            dynamic_tool_owner_mode: crate::DynamicToolOwnerMode::Normal,
             auth_manager,
             thread_manager,
             outgoing,
@@ -617,6 +700,13 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.dynamic_tool_owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead
+            && matches!(target, ThreadResumeTarget::DaemonRecovery(_))
+        {
+            return Err(invalid_request(
+                "Sovereign owner mode requires a foreground client",
+            ));
+        }
         let mut prepared_config = None;
         // Keep the resume future off the request handler's stack.
         while Box::pin(self.thread_resume_inner(
@@ -1345,8 +1435,10 @@ impl ThreadRequestProcessor {
         let initial_config_warnings = Arc::clone(&self.initial_config_warnings);
         let outgoing = Arc::clone(&listener_task_context.outgoing);
         let error_request_id = request_id.clone();
+        let owner_mode = self.dynamic_tool_owner_mode;
         let thread_start_task = async move {
             if let Err(error) = Self::thread_start_task(
+                owner_mode,
                 listener_task_context,
                 thread_store,
                 config_manager,
@@ -1429,6 +1521,7 @@ impl ThreadRequestProcessor {
 
     #[allow(clippy::too_many_arguments)]
     async fn thread_start_task(
+        owner_mode: crate::DynamicToolOwnerMode,
         listener_task_context: ListenerTaskContext,
         thread_store: Arc<dyn ThreadStore>,
         config_manager: ConfigManager,
@@ -1458,6 +1551,9 @@ impl ThreadRequestProcessor {
             .load_with_overrides(config_overrides.clone(), typesafe_overrides.clone())
             .await
             .map_err(|err| config_load_error(&err))?;
+        if owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead {
+            sovereign_owner_tool_policy(&config)?;
+        }
         if config.ephemeral && daybreak_enabled.is_some() {
             return Err(invalid_request(
                 "daybreakEnabled is not supported for ephemeral threads",
@@ -1563,7 +1659,19 @@ impl ThreadRequestProcessor {
                 .thread_manager
                 .default_environment_requests(&config.cwd, &config.workspace_roots)
         });
-        let dynamic_tools = dynamic_tools.unwrap_or_default();
+        let dynamic_tools = if owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead {
+            if dynamic_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.is_empty())
+            {
+                return Err(invalid_request(
+                    "client-defined tools forbidden for owner-pinned thread",
+                ));
+            }
+            sovereign_fixed_read_head_tool()
+        } else {
+            dynamic_tools.unwrap_or_default()
+        };
         if !dynamic_tools.is_empty() {
             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
         }
@@ -1580,6 +1688,10 @@ impl ThreadRequestProcessor {
                 .then_some(ThreadHistoryMode::Paginated)
         });
         let mut thread_extension_init = ExtensionDataInit::new();
+        if owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead {
+            thread_extension_init.insert(sovereign_owner_tool_policy(&config)?);
+            thread_extension_init.insert(codex_extension_api::SovereignReadHeadOwner);
+        }
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -4331,7 +4443,19 @@ impl ThreadRequestProcessor {
             }
         }
         let response_history = thread_history.clone();
-
+        // Never reinstate the permissive default after a cold resume.
+        let mut sovereign_resume_options = StartThreadOptions::new(config);
+        if self.dynamic_tool_owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead {
+            sovereign_resume_options
+                .thread_extension_init
+                .insert(sovereign_owner_tool_policy(
+                    &sovereign_resume_options.config,
+                )?);
+            sovereign_resume_options
+                .thread_extension_init
+                .insert(codex_extension_api::SovereignReadHeadOwner);
+            sovereign_resume_options.dynamic_tools = sovereign_fixed_read_head_tool();
+        }
         match self
             .thread_manager
             .start_thread(StartThreadOptions {
@@ -4343,7 +4467,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
-                ..StartThreadOptions::new(config)
+                ..sovereign_resume_options
             })
             .await
         {
@@ -4685,6 +4809,13 @@ impl ThreadRequestProcessor {
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
+            let owner_mode =
+                self.dynamic_tool_owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead;
+            if existing_thread.requires_dynamic_tool_cleanup() != owner_mode {
+                return Err(invalid_request(
+                    "loaded thread owner mode differs from this host",
+                ));
+            }
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
             let existing_thread_rollout_path = existing_thread.rollout_path();
@@ -4702,6 +4833,9 @@ impl ThreadRequestProcessor {
             }
             let (config_snapshot, selected_service_tier) =
                 existing_thread.resume_config_snapshot().await;
+            if owner_mode {
+                sovereign_check_running_thread(&existing_thread, &config_snapshot).await?;
+            }
             let mismatch_details = collect_resume_override_mismatches(
                 params,
                 &config_snapshot,
@@ -5499,6 +5633,16 @@ impl ThreadRequestProcessor {
                     })?,
             )
         };
+        if self.dynamic_tool_owner_mode == crate::DynamicToolOwnerMode::Normal
+            && source_history_items.iter().any(|item| {
+                matches!(item,
+                RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+            })
+        {
+            return Err(invalid_request(
+                "Sovereign owner history cannot be forked by a normal host",
+            ));
+        }
         let history_cwd = Some(source_thread.cwd.clone());
 
         // Persist Windows sandbox mode.
@@ -5609,7 +5753,7 @@ impl ThreadRequestProcessor {
             );
         }
         let (inherited_options, inherited_settings) = inherited_fork.unzip();
-        let options = if let Some(options) = inherited_options {
+        let mut options = if let Some(options) = inherited_options {
             *options
         } else {
             // Derive a Config using the same logic as new conversation, honoring overrides if provided.
@@ -5623,6 +5767,16 @@ impl ThreadRequestProcessor {
                 ..StartThreadOptions::new(config)
             }
         };
+        // A fork is a new authority boundary: never inherit a widened ceiling.
+        if self.dynamic_tool_owner_mode == crate::DynamicToolOwnerMode::SovereignReadHead {
+            options
+                .thread_extension_init
+                .insert(sovereign_owner_tool_policy(&options.config)?);
+            options
+                .thread_extension_init
+                .insert(codex_extension_api::SovereignReadHeadOwner);
+            options.dynamic_tools = sovereign_fixed_read_head_tool();
+        }
         let goals_enabled = options.config.features.enabled(Feature::Goals);
 
         let fallback_model_provider = options.config.model_provider_id.clone();

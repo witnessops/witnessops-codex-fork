@@ -76,3 +76,135 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  dns-sqlite-compatibility:
+    if: github.repository == 'witnessops/witnessops-codex-fork' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./codex-rs
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Test Hickory compatibility and malformed SVCB handling
+        run: cargo test --locked -p codex-network-proxy --test dns_compatibility
+
+      - name: Test SQLite runtime and persistence compatibility
+        run: cargo test --locked -p codex-state --lib sqlite
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  # One cold-build capacity check for recovery; this does not replace the held
+  # cross-platform Bazel, Rust CI or SDK families in blocking-ci.yml.
+  recovery-linux-build:
+    name: Recovery Linux GNU build and tests
+    if: github.repository == 'witnessops/witnessops-codex-fork' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      BUILDBUDDY_API_KEY: ""
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Record candidate and runner capacity
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^1 HEAD^2
+          uname -a
+          nproc
+          free -h
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-unknown-linux-gnu
+          cache-scope: bazel-test
+
+      - name: Check V8 checksums and workflow helpers
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/rusty_v8_bazel.py check-module-bazel
+          just test-github-scripts
+
+      - name: Check MODULE.bazel.lock is up to date
+        run: ./scripts/check-module-bazel-lock.sh
+
+      - name: Resolve app-server/exec-server compatibility releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          releases="$(python3 .github/scripts/resolve_exec_server_releases.py)"
+          echo "CODEX_COMPAT_RELEASES=$releases" >> "$GITHUB_ENV"
+
+      - name: Build and test the Linux GNU workspace once
+        timeout-minutes: 170
+        run: |
+          set -euo pipefail
+          # Match the ordinary Linux test scope. V8 consumers remain included;
+          # the separate argument-comment-lint and standalone V8 jobs stay held.
+          ./.github/scripts/run-bazel-ci.sh \
+            --print-failed-action-summary \
+            --print-failed-test-logs \
+            -- \
+            test \
+            --platforms=//:local_linux \
+            --lockfile_mode=error \
+            --keep_going \
+            --flaky_test_attempts=1 \
+            --runs_per_test=1 \
+            --nocache_test_results \
+            --test_tag_filters=-argument-comment-lint \
+            --test_verbose_timeout_warnings \
+            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+            -- \
+            //... \
+            -//third_party/v8:all
+
+      - name: Record remaining runner capacity
+        if: always() && !cancelled()
+        run: |
+          free -h
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Upload Bazel execution logs
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: recovery-linux-build-execution-logs
+          path: ${{ runner.temp }}/bazel-execution-logs
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

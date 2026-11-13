@@ -754,6 +754,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
     let legacy_thread_id = ThreadId::new();
     store
         .create_thread(CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -3069,6 +3070,7 @@ async fn create_paginated_subagent_thread(
 ) {
     store
         .create_thread(CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,

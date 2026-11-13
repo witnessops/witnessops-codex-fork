@@ -5,3 +5,7 @@ pnpm-lock.yaml
 prompt.md
 *_prompt.md
 *_instructions.md
+
+# Preserve upstream text in the two compatibility bridges.
+/third_party/rama-dns/
+/third_party/sqlx-sqlite/

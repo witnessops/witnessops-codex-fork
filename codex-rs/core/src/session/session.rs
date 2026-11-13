@@ -94,6 +94,7 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) realtime_history: Option<Mutex<crate::realtime_history::RealtimeHistoryState>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pub(crate) dynamic_tool_cleanup: super::dynamic_tool_cleanup::DynamicToolCleanup,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) services: SessionServices,
@@ -1059,6 +1060,9 @@ impl Session {
         // Publish the already resolved model before extensions make startup decisions.
         // Turn construction refreshes this attachment when the selected model changes.
         thread_extension_init.insert(Arc::unwrap_or_clone(model_info.model));
+        let sovereign_read_head = thread_extension_init
+            .get::<codex_extension_api::SovereignReadHeadOwner>()
+            .is_some();
         let tool_policy = thread_extension_init
             .get::<codex_extension_api::ToolPolicy>()
             .unwrap_or_else(|| {
@@ -1097,6 +1101,7 @@ impl Session {
                     InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
                         let auth = persistence_auth.await;
                         let params = CreateThreadParams {
+                            sovereign_read_head,
                             attached_thread,
                             creator_user_id: auth.as_ref().and_then(CodexAuth::get_chatgpt_user_id),
                             creator_account_id: auth.as_ref().and_then(CodexAuth::get_account_id),
@@ -1282,6 +1287,16 @@ impl Session {
             {
                 resumed.history = history;
                 resumed.history_revision = None;
+            }
+            // Recheck the store's authoritative history after writer acquisition;
+            // caller-supplied history cannot remove a persisted owner restriction.
+            if !sovereign_read_head
+                && initial_history.scan_rollout_items(|item| {
+                    matches!(item,
+                RolloutItem::SessionMeta(meta) if meta.meta.sovereign_read_head)
+                })
+            {
+                anyhow::bail!("Sovereign owner history requires explicit host owner mode");
             }
             let rollout_path = if let Some(live_thread) = live_thread.as_ref() {
                 live_thread.local_rollout_path().await?
@@ -1922,6 +1937,7 @@ impl Session {
                     && services.live_thread.is_some())
                 .then(|| Mutex::new(Default::default())),
                 active_turn: Mutex::new(None),
+                dynamic_tool_cleanup: Default::default(),
                 async_hook_results,
                 input_queue: InputQueue::with_controller(
                     thread_id,

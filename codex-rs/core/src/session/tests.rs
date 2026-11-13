@@ -5075,6 +5075,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
     let live_thread = LiveThread::create(
         Arc::clone(&session.services.thread_store),
         CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -7168,6 +7169,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         conversation: Arc::new(RealtimeConversationManager::new()),
         realtime_history: None,
         active_turn: Mutex::new(None),
+        dynamic_tool_cleanup: Default::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         services,
@@ -8843,6 +8845,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
     let live_thread = LiveThread::create(
         Arc::clone(&thread_store),
         CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -8982,6 +8985,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() -> anyhow::Re
     let live_thread = LiveThread::create(
         Arc::clone(&thread_store),
         CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -9491,6 +9495,7 @@ where
         conversation: Arc::new(RealtimeConversationManager::new()),
         realtime_history: None,
         active_turn: Mutex::new(None),
+        dynamic_tool_cleanup: Default::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         services,
@@ -11969,6 +11974,7 @@ async fn attach_in_memory_thread_store(
     let live_thread = LiveThread::create(
         Arc::clone(&thread_store),
         CreateThreadParams {
+            sovereign_read_head: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,

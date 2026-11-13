@@ -6,6 +6,7 @@ on:
 jobs:
   # --- Detect changed paths so the fast PR workflow only runs relevant jobs ---
   changed:
+    timeout-minutes: 5
     name: Detect changed areas
     runs-on: ubuntu-24.04
     outputs:
@@ -58,6 +59,7 @@ jobs:
 
   # --- Fast Cargo-native PR checks -------------------------------------------
   general:
+    timeout-minutes: 30
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
@@ -83,6 +85,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   cargo_shear:
+    timeout-minutes: 30
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
@@ -107,6 +110,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   argument_comment_lint_package:
+    timeout-minutes: 30
     name: Argument comment lint package
     runs-on: ubuntu-24.04
     needs: changed
@@ -163,12 +167,9 @@ jobs:
 
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     needs: changed
-    environment:
-      name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -177,14 +178,11 @@ jobs:
             runner: ubuntu-24.04
             timeout_minutes: 30
           - name: macOS
-            runner: macos-15-xlarge
+            runner: macos-15
             timeout_minutes: 30
           - name: Windows
-            runner: windows-x64
+            runner: windows-2025
             timeout_minutes: 30
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
     steps:
       - name: Check whether argument comment lint should run
         id: argument_comment_lint_gate
@@ -209,7 +207,7 @@ jobs:
         uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
-          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
+          buildbuddy-api-key: ""
 
       - name: Check for a clean worktree
         if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'
@@ -217,6 +215,7 @@ jobs:
 
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
+    timeout-minutes: 5
     name: CI results (required)
     needs:
       [

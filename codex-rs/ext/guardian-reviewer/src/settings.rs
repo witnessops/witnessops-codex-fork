@@ -51,6 +51,7 @@ pub fn reviewer_tool_policy() -> ToolPolicy {
         ),
         require_managed_sandbox: true,
         require_unified_exec: true,
+        require_code_mode_only: false,
         expose_additional_permissions: false,
     }
 }

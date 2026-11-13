@@ -204,6 +204,56 @@
       "description": "Request from the client to the server.",
       "oneOf": [
         {
+          "description": "Read cleanup state without replaying a tool operation or entering its turn queue.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "item/tool/cleanup/read"
+              ],
+              "title": "Item/tool/cleanup/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/DynamicToolCleanupReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Item/tool/cleanup/readRequest",
+          "type": "object"
+        },
+        {
+          "description": "Idempotently deliver a verified cleanup result, including after reconnect.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "item/tool/cleanup/ack"
+              ],
+              "title": "Item/tool/cleanup/ackRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/DynamicToolCleanupAckParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Item/tool/cleanup/ackRequest",
+          "type": "object"
+        },
+        {
           "properties": {
             "id": {
               "$ref": "#/definitions/v2/RequestId"
@@ -2994,6 +3044,13 @@
         "callId": {
           "type": "string"
         },
+        "cleanupToken": {
+          "description": "Private, per-callback cleanup capability. Never replay the tool to recover it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "namespace": {
           "type": [
             "string",
@@ -3023,6 +3080,10 @@
     "DynamicToolCallResponse": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "cleanupComplete": {
+          "description": "After cancellation, true acknowledges that all callback effects and child processes have stopped and cleanup/reaping has completed. Missing/false, malformed responses and transport errors do not release turn teardown.",
+          "type": "boolean"
+        },
         "contentItems": {
           "items": {
             "$ref": "#/definitions/v2/DynamicToolCallOutputContentItem"
@@ -3497,6 +3558,10 @@
         "platformOs": {
           "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
           "type": "string"
+        },
+        "sovereignReadHead": {
+          "description": "True only when the host explicitly started the fixed Sovereign read-head owner mode.",
+          "type": "boolean"
         },
         "userAgent": {
           "type": "string"
@@ -11162,11 +11227,130 @@
           }
         ]
       },
+      "DynamicToolCallResponse": {
+        "properties": {
+          "cleanupComplete": {
+            "description": "After cancellation, true acknowledges that all callback effects and child processes have stopped and cleanup/reaping has completed. Missing/false, malformed responses and transport errors do not release turn teardown.",
+            "type": "boolean"
+          },
+          "contentItems": {
+            "items": {
+              "$ref": "#/definitions/v2/DynamicToolCallOutputContentItem"
+            },
+            "type": "array"
+          },
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contentItems",
+          "success"
+        ],
+        "type": "object"
+      },
       "DynamicToolCallStatus": {
         "enum": [
           "inProgress",
           "completed",
           "failed"
+        ],
+        "type": "string"
+      },
+      "DynamicToolCleanupAckParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "identity": {
+            "$ref": "#/definitions/v2/DynamicToolCleanupIdentity"
+          },
+          "response": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/DynamicToolCallResponse"
+              }
+            ],
+            "description": "Original result, retained by the owner after verified cleanup. This RPC never executes work."
+          }
+        },
+        "required": [
+          "identity",
+          "response"
+        ],
+        "title": "DynamicToolCleanupAckParams",
+        "type": "object"
+      },
+      "DynamicToolCleanupAckResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "alreadyAcknowledged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "alreadyAcknowledged"
+        ],
+        "title": "DynamicToolCleanupAckResponse",
+        "type": "object"
+      },
+      "DynamicToolCleanupIdentity": {
+        "properties": {
+          "callId": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "requestId": {
+            "$ref": "#/definitions/v2/RequestId"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "callId",
+          "capability",
+          "requestId",
+          "threadId",
+          "turnId"
+        ],
+        "type": "object"
+      },
+      "DynamicToolCleanupReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "identity": {
+            "$ref": "#/definitions/v2/DynamicToolCleanupIdentity"
+          }
+        },
+        "required": [
+          "identity"
+        ],
+        "title": "DynamicToolCleanupReadParams",
+        "type": "object"
+      },
+      "DynamicToolCleanupReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "status": {
+            "$ref": "#/definitions/v2/DynamicToolCleanupStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "DynamicToolCleanupReadResponse",
+        "type": "object"
+      },
+      "DynamicToolCleanupStatus": {
+        "enum": [
+          "running",
+          "cancelling",
+          "ownerDetached",
+          "acknowledged"
         ],
         "type": "string"
       },

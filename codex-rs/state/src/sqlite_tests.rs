@@ -600,3 +600,44 @@ async fn required_nfs_migration_refuses_active_wal_and_retries_after_close() -> 
     legacy.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn fixed_sqlite_runtime_preserves_committed_wal_data() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(directory.path().abs());
+    sqlite.is_nfs.set(false)?;
+    let path = sqlite.state_db_path();
+    let pool = sqlite.open_read_write_pool(&path).await?;
+    let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+        .fetch_one(&pool)
+        .await?;
+    let components = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        components.as_slice() >= [3, 54, 0].as_slice(),
+        "unfixed SQLite runtime: {version}"
+    );
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(mode, "wal");
+    sqlx::query("CREATE TABLE compatibility_probe (value TEXT NOT NULL)")
+        .execute(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("INSERT INTO compatibility_probe VALUES (?)")
+        .bind("committed")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    pool.close().await;
+    let reopened = sqlite.open_read_write_pool(&path).await?;
+    let value: String = sqlx::query_scalar("SELECT value FROM compatibility_probe")
+        .fetch_one(&reopened)
+        .await?;
+    assert_eq!(value, "committed");
+    reopened.close().await;
+    Ok(())
+}

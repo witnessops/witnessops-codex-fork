@@ -30,6 +30,9 @@ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_C
 #[derive(Debug, Parser)]
 #[command(version)]
 struct AppServerArgs {
+    /// Admit only the fixed Sovereign read-head owner policy for this process.
+    #[arg(long)]
+    sovereign_read_head: bool,
     /// Load frozen cloud skills from a JSON snapshot instead of a live skill service.
     #[arg(long, value_name = "PATH")]
     cloud_skills_snapshot: Option<PathBuf>,
@@ -83,6 +86,7 @@ fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         let AppServerArgs {
+            sovereign_read_head,
             cloud_skills_snapshot,
             config_overrides,
             code_mode_host,
@@ -95,6 +99,11 @@ fn main() -> anyhow::Result<()> {
             remote_control,
             managed_daemon,
         } = AppServerArgs::parse();
+        if sovereign_read_head && (managed_daemon || remote_control) {
+            anyhow::bail!(
+                "Sovereign read-head mode cannot enable managed daemon or remote control"
+            );
+        }
         let loader_overrides = if disable_managed_config_from_debug_env() {
             LoaderOverrides::without_managed_config_for_tests()
         } else {
@@ -105,6 +114,11 @@ fn main() -> anyhow::Result<()> {
         let transport = listen;
         let auth = auth.try_into_settings()?;
         let mut runtime_options = AppServerRuntimeOptions {
+            dynamic_tool_owner_mode: if sovereign_read_head {
+                codex_app_server::DynamicToolOwnerMode::SovereignReadHead
+            } else {
+                codex_app_server::DynamicToolOwnerMode::Normal
+            },
             cloud_skills_snapshot,
             code_mode_host_transport: code_mode_host.into(),
             managed_daemon,
@@ -114,12 +128,14 @@ fn main() -> anyhow::Result<()> {
         if disable_plugin_startup_tasks_for_tests {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
         }
-        runtime_options.remote_control_startup_mode =
-            match (remote_control, remote_control_disabled) {
-                (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
-                (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
-                (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
-            };
+        runtime_options.remote_control_startup_mode = match (
+            remote_control,
+            remote_control_disabled || sovereign_read_head,
+        ) {
+            (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
+            (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
+            (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
+        };
 
         let exit = run_main_with_transport_options(
             arg0_paths,

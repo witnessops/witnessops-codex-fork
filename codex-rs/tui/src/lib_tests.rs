@@ -29,6 +29,63 @@ fn tui_startup_future_stays_bounded() {
     assert!(size < 64 * 1024, "TUI startup future is {size} bytes");
 }
 
+#[tokio::test]
+async fn sovereign_native_startup_rejects_incompatible_options_before_terminal() {
+    for arguments in [
+        vec!["--worktree"],
+        vec!["--oss"],
+        vec!["--local-provider", "ollama"],
+        vec!["--add-dir", "/tmp/sovereign-extra-root"],
+        vec!["--dangerously-bypass-approvals-and-sandbox"],
+    ] {
+        let mut command = vec!["codex", "--sovereign-read-head"];
+        command.extend(arguments.clone());
+        let cli = Cli::try_parse_from(command).expect("valid CLI syntax");
+        let error = startup_orchestration::run_main_inner(
+            cli,
+            Arg0DispatchPaths::default(),
+            LoaderOverrides::without_managed_config_for_tests(),
+            None,
+        )
+        .await
+        .err()
+        .expect("incompatible owner options must fail before startup");
+        assert_eq!(
+            error.to_string(),
+            "--sovereign-read-head requires the fixed local owner workspace and managed read-only profile",
+            "arguments: {arguments:?}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn sovereign_native_startup_rejects_nonlocal_remote_before_connecting() {
+    for websocket_url in [
+        "wss://example.invalid/rpc",
+        "ws://192.0.2.1:9876/",
+        "ws://[2001:db8::1]:9876/",
+        "not-a-url",
+    ] {
+        let error = startup_orchestration::run_main_inner(
+            Cli::parse_from(["codex", "--sovereign-read-head"]),
+            Arg0DispatchPaths::default(),
+            LoaderOverrides::without_managed_config_for_tests(),
+            Some(RemoteAppServerEndpoint::WebSocket {
+                websocket_url: websocket_url.to_string(),
+                auth_token: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("nonlocal owner endpoint must fail before connecting");
+        assert_eq!(
+            error.to_string(),
+            "--sovereign-read-head requires the fixed local owner workspace and managed read-only profile",
+            "endpoint: {websocket_url}",
+        );
+    }
+}
+
 async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())

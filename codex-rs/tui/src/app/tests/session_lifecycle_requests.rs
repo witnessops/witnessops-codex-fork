@@ -1903,6 +1903,7 @@ async fn embedded_server_dispatches_only_its_own_dynamic_tools() -> Result<()> {
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::Integer(id),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        cleanup_token: None,
                         thread_id: "thread-1".to_string(),
                         turn_id: "turn-1".to_string(),
                         call_id: "call-1".to_string(),
@@ -2045,6 +2046,7 @@ async fn check_dynamic_tool_requests(
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::Integer(100),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        cleanup_token: None,
                         thread_id: thread_id.clone(),
                         turn_id: "turn-1".to_string(),
                         call_id: "call-1".to_string(),
@@ -2065,6 +2067,7 @@ async fn check_dynamic_tool_requests(
             ServerRequest::DynamicToolCall {
                 request_id: AppServerRequestId::Integer(101),
                 params: codex_app_server_protocol::DynamicToolCallParams {
+                    cleanup_token: None,
                     thread_id: thread_id.clone(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-2".to_string(),
@@ -2122,6 +2125,7 @@ async fn check_dynamic_tool_requests(
             ServerRequest::DynamicToolCall {
                 request_id: AppServerRequestId::Integer(102),
                 params: codex_app_server_protocol::DynamicToolCallParams {
+                    cleanup_token: None,
                     thread_id: thread_id.clone(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-3".to_string(),
@@ -2156,6 +2160,7 @@ async fn check_dynamic_tool_requests(
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::String(format!("rejected-{index}")),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        cleanup_token: None,
                         thread_id: thread_id.clone(),
                         turn_id: "turn-1".to_string(),
                         call_id: format!("rejected-{index}"),
@@ -2235,6 +2240,7 @@ async fn check_dynamic_tool_requests(
         &app_server,
         AppServerRequestId::Integer(103),
         codex_app_server_protocol::DynamicToolCallParams {
+            cleanup_token: None,
             thread_id: creation_source.to_string(),
             turn_id: "turn-1".to_string(),
             call_id: "call-4".to_string(),
@@ -2358,6 +2364,7 @@ async fn check_dynamic_tool_requests(
         &app_server,
         AppServerRequestId::Integer(104),
         codex_app_server_protocol::DynamicToolCallParams {
+            cleanup_token: None,
             thread_id: thread_id.clone(),
             turn_id: "turn-1".to_string(),
             call_id: "call-5".to_string(),
@@ -2898,6 +2905,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     let response = crate::dynamic_tools::execute(
         app_server.request_handle(),
         codex_app_server_protocol::DynamicToolCallParams {
+            cleanup_token: None,
             thread_id: started.session.thread_id.to_string(),
             turn_id: "source-turn".to_string(),
             call_id: "legacy-wait".to_string(),

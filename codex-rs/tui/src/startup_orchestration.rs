@@ -13,6 +13,38 @@ pub(super) async fn run_main_inner(
     loader_overrides: LoaderOverrides,
     mut explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    if cli.sovereign_read_head {
+        let remote_is_local = match explicit_remote_endpoint.as_ref() {
+            Some(RemoteAppServerEndpoint::WebSocket { websocket_url, .. }) => {
+                url::Url::parse(websocket_url)
+                    .ok()
+                    .is_some_and(|url| match url.host() {
+                        Some(url::Host::Domain(host)) => host == "localhost",
+                        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                        None => false,
+                    })
+            }
+            Some(RemoteAppServerEndpoint::UnixSocket { .. }) | None => true,
+        };
+        if cli.shared.worktree
+            || cli.oss
+            || cli.oss_provider.is_some()
+            || !cli.add_dir.is_empty()
+            || cli.dangerously_bypass_approvals_and_sandbox
+            || is_workload_identity_selected()
+            || !remote_is_local
+            || std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).is_some()
+        {
+            return Err(std::io::Error::other(
+                "--sovereign-read-head requires the fixed local owner workspace and managed read-only profile",
+            ));
+        }
+        // Explicit owner mode never discovers or starts a shared background server.
+        if explicit_remote_endpoint.is_none() {
+            cli.no_daemon = true;
+        }
+    }
     if cli.no_daemon && explicit_remote_endpoint.is_some() {
         return Err(std::io::Error::other(
             "--no-daemon cannot be used with --remote.",

@@ -380,6 +380,16 @@ pub(crate) fn finalize_tool_router(
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
+    // A host-captured owner ceiling must win over model metadata and
+    // configuration fallback. No tool spec/route may be returned on mismatch.
+    if registry.tool_policy.require_code_mode_only
+        && (tool_mode != ToolMode::CodeModeOnly || !turn_context.code_mode_available)
+    {
+        return Err(CodexErrorDetails::InvalidRequest(
+            "owner requires available effective CodeModeOnly before tool construction".to_owned(),
+        )
+        .into());
+    }
     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
     if code_mode_enabled {
         for tool_name in [

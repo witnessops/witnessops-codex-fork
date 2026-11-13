@@ -16,6 +16,9 @@ pub struct ToolPolicy {
     pub require_managed_sandbox: bool,
     /// Omit shell tools when unified exec is disabled, instead of using one-shot exec.
     pub require_unified_exec: bool,
+    /// Reject owner tool-plan construction unless effective CodeModeOnly is ready.
+    /// This is a per-turn ceiling, not an inference from a model name or config flag.
+    pub require_code_mode_only: bool,
     /// Advertise additional-permission arguments when the feature is enabled.
     pub expose_additional_permissions: bool,
 }
@@ -26,6 +29,7 @@ impl Default for ToolPolicy {
             allowed_tools: None,
             require_managed_sandbox: false,
             require_unified_exec: false,
+            require_code_mode_only: false,
             expose_additional_permissions: true,
         }
     }

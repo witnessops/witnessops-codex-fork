@@ -135,6 +135,7 @@ pub(crate) enum OutgoingEnvelope {
 
 /// Sends messages to the client and manages request callbacks.
 pub(crate) struct OutgoingMessageSender {
+    pub(crate) dynamic_tool_recovery: crate::dynamic_tool_recovery::DynamicToolRecovery,
     verification_auth: OnceLock<Arc<codex_login::AuthManager>>,
     verification_connections: Mutex<HashSet<ConnectionId>>,
     human_approval_connections: Mutex<HashSet<ConnectionId>>,
@@ -157,6 +158,8 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
 }
 
 struct PendingCallbackEntry {
+    // Only a connection to which this callback was sent may acknowledge cleanup.
+    dynamic_tool_recipients: Option<HashSet<ConnectionId>>,
     human_approval_recipients: HashSet<ConnectionId>,
     verification_owner: Option<ConnectionId>,
     verification_auth_revision: Option<u64>,
@@ -189,6 +192,39 @@ impl ThreadScopedOutgoingMessageSender {
                 Some(self.connection_ids.as_slice()),
                 payload,
                 Some(self.thread_id),
+            )
+            .await
+    }
+
+    pub(crate) async fn send_dynamic_tool_request(
+        &self,
+        params: codex_app_server_protocol::DynamicToolCallParams,
+        original_thread: Arc<codex_core::CodexThread>,
+    ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        let requires_cleanup = original_thread.requires_dynamic_tool_cleanup();
+        self.outgoing
+            .send_request_with_origin(
+                Some(self.connection_ids.as_slice()),
+                ServerRequestPayload::DynamicToolCall(params),
+                Some(self.thread_id),
+                Some(original_thread),
+                requires_cleanup,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    async fn send_owner_request(
+        &self,
+        payload: ServerRequestPayload,
+    ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        self.outgoing
+            .send_request_with_origin(
+                Some(self.connection_ids.as_slice()),
+                payload,
+                Some(self.thread_id),
+                None,
+                true,
             )
             .await
     }
@@ -271,6 +307,7 @@ impl OutgoingMessageSender {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
+            dynamic_tool_recovery: Default::default(),
             verification_auth: OnceLock::new(),
             verification_connections: Mutex::new(HashSet::new()),
             human_approval_connections: Mutex::new(HashSet::new()),
@@ -327,6 +364,9 @@ impl OutgoingMessageSender {
     }
 
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
+        self.dynamic_tool_recovery
+            .mark_detached(connection_id)
+            .await;
         self.human_approval_connections
             .lock()
             .await
@@ -391,9 +431,21 @@ impl OutgoingMessageSender {
         request: ServerRequestPayload,
         thread_id: Option<ThreadId>,
     ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        self.send_request_with_origin(connection_ids, request, thread_id, None, false)
+            .await
+    }
+
+    async fn send_request_with_origin(
+        &self,
+        connection_ids: Option<&[ConnectionId]>,
+        request: ServerRequestPayload,
+        thread_id: Option<ThreadId>,
+        original_thread: Option<Arc<codex_core::CodexThread>>,
+        requires_cleanup: bool,
+    ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
         let id = self.next_request_id();
         let outgoing_message_id = id.clone();
-        let request = request.request_with_id(outgoing_message_id.clone());
+        let mut request = request.request_with_id(outgoing_message_id.clone());
         let user_verification = matches!(
             &request,
             ServerRequest::McpServerElicitationRequest { params, .. }
@@ -413,6 +465,41 @@ impl OutgoingMessageSender {
                     || verification_identity != self.verification_identity())
         };
         let (tx_approve, rx_approve) = oneshot::channel();
+        // Execution capabilities must never be broadcast to arbitrary subscribers.
+        // Admission fails before dispatch unless exactly one scoped owner exists.
+        if requires_cleanup && let ServerRequest::DynamicToolCall { params, .. } = &mut request {
+            let owner = connection_ids.and_then(|ids| match ids {
+                [owner] => Some(*owner),
+                _ => None,
+            });
+            let capability = match owner {
+                Some(owner)
+                    if thread_id.is_some_and(|thread| thread.to_string() == params.thread_id)
+                        && (original_thread.is_some() || cfg!(test)) =>
+                {
+                    self.dynamic_tool_recovery
+                        .register_with_origin(
+                            outgoing_message_id.clone(),
+                            &params.thread_id,
+                            &params.turn_id,
+                            &params.call_id,
+                            owner,
+                            original_thread,
+                        )
+                        .await
+                        .ok()
+                }
+                _ => None,
+            };
+            let Some(capability) = capability else {
+                // No external callback was dispatched, so there are no external effects to reap.
+                let _ = tx_approve.send(Ok(serde_json::json!({"contentItems":[{"type":"inputText",
+                    "text":"dynamic tool not dispatched: one live owner and recovery capacity are required"}],
+                    "success":false,"cleanupComplete":true})));
+                return (outgoing_message_id, rx_approve);
+            };
+            params.cleanup_token = Some(capability);
+        }
         let human_connections;
         let connection_ids = if requires_human_approval(&request) {
             let eligible = self.human_approval_connections.lock().await;
@@ -451,6 +538,11 @@ impl OutgoingMessageSender {
             request_id_to_callback.insert(
                 id,
                 PendingCallbackEntry {
+                    dynamic_tool_recipients: if requires_cleanup {
+                        connection_ids.map(|ids| ids.iter().copied().collect())
+                    } else {
+                        None
+                    },
                     human_approval_recipients: if requires_human_approval(&request) {
                         connection_ids.unwrap_or_default().iter().copied().collect()
                     } else {
@@ -503,8 +595,10 @@ impl OutgoingMessageSender {
                         send_error = Some(err);
                         break;
                     } else {
-                        self.analytics_events_client
-                            .track_server_request(connection_id.0, request.clone());
+                        if !requires_cleanup {
+                            self.analytics_events_client
+                                .track_server_request(connection_id.0, request.clone());
+                        }
                     }
                 }
                 match send_error {
@@ -517,7 +611,9 @@ impl OutgoingMessageSender {
         if let Err(err) = send_result {
             warn!("failed to send request {outgoing_message_id:?} to client: {err:?}");
             let mut request_id_to_callback = self.request_id_to_callback.lock().await;
-            request_id_to_callback.remove(&outgoing_message_id);
+            if !requires_cleanup {
+                request_id_to_callback.remove(&outgoing_message_id);
+            }
         }
         (outgoing_message_id, rx_approve)
     }
@@ -566,10 +662,65 @@ impl OutgoingMessageSender {
         id: RequestId,
         result: Result,
     ) {
+        // Malformed dynamic results must not consume the sole execution waiter.
+        let dynamic_response = {
+            let callbacks = self.request_id_to_callback.lock().await;
+            if callbacks
+                .get(&id)
+                .is_some_and(|entry| entry.dynamic_tool_recipients.is_some())
+            {
+                let (response, error) = crate::dynamic_tools::decode_response(result.clone());
+                if error.is_some() {
+                    return;
+                }
+                Some(response)
+            } else {
+                None
+            }
+        };
         let entry = self.take_connection_callback(connection_id, &id).await;
 
         match entry {
             Some((id, entry)) => {
+                if let Some(response) = dynamic_response
+                    && response.cleanup_complete
+                    && let ServerRequest::DynamicToolCall { params, .. } = &entry.request
+                    && let Some(capability) = &params.cleanup_token
+                {
+                    // The connection-bound callback supplies the original identity.
+                    // A receipt is valid only after delivery to that pinned runtime;
+                    // forwarding the legacy oneshot alone does not establish cleanup.
+                    let identity = codex_app_server_protocol::DynamicToolCleanupIdentity {
+                        thread_id: params.thread_id.clone(),
+                        turn_id: params.turn_id.clone(),
+                        call_id: params.call_id.clone(),
+                        request_id: id.clone(),
+                        capability: capability.clone(),
+                    };
+                    if let Ok(Some(thread)) =
+                        self.dynamic_tool_recovery.pending_original(&identity).await
+                    {
+                        thread
+                            .respond_to_dynamic_tool_call(
+                                &identity.turn_id,
+                                &identity.call_id,
+                                codex_protocol::dynamic_tools::DynamicToolResponse {
+                                    content_items: response
+                                        .content_items
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
+                                    success: response.success,
+                                },
+                                true,
+                            )
+                            .await;
+                        if let Err(error) = self.dynamic_tool_recovery.acknowledge(&identity).await
+                        {
+                            warn!(%error, "could not record dynamic tool cleanup receipt");
+                        }
+                    }
+                }
                 let completed_at_ms = now_unix_timestamp_ms();
                 if entry.verification_owner.is_none()
                     && let Ok(response) = entry.request.response_from_result(result.clone())
@@ -587,6 +738,16 @@ impl OutgoingMessageSender {
             None => {
                 warn!("could not find callback for {id:?}");
             }
+        }
+    }
+
+    pub(crate) async fn settle_recovered_dynamic_callback(
+        &self,
+        identity: &codex_app_server_protocol::DynamicToolCleanupIdentity,
+        result: Result,
+    ) {
+        if let Some((_, entry)) = self.take_request_callback(&identity.request_id).await {
+            let _ = entry.callback.send(Ok(result));
         }
     }
 
@@ -666,6 +827,13 @@ impl OutgoingMessageSender {
             .contains(&connection_id);
         let mut callbacks = self.request_id_to_callback.lock().await;
         let entry = callbacks.get(id)?;
+        if entry
+            .dynamic_tool_recipients
+            .as_ref()
+            .is_some_and(|recipients| !recipients.contains(&connection_id))
+        {
+            return None;
+        }
         if requires_human_approval(&entry.request)
             && (!human_approval || !entry.human_approval_recipients.contains(&connection_id))
         {
@@ -693,8 +861,10 @@ impl OutgoingMessageSender {
         let mut requests = request_id_to_callback
             .values()
             .filter_map(|entry| {
-                (entry.thread_id == Some(thread_id) && entry.verification_owner.is_none())
-                    .then_some(entry.request.clone())
+                (entry.thread_id == Some(thread_id)
+                    && entry.verification_owner.is_none()
+                    && entry.dynamic_tool_recipients.is_none())
+                .then_some(entry.request.clone())
             })
             .collect::<Vec<_>>();
         requests.sort_by(|left, right| left.id().cmp(right.id()));
@@ -711,7 +881,8 @@ impl OutgoingMessageSender {
             let request_ids = request_id_to_callback
                 .iter()
                 .filter_map(|(request_id, entry)| {
-                    (entry.thread_id == Some(thread_id)).then_some(request_id.clone())
+                    (entry.thread_id == Some(thread_id) && entry.dynamic_tool_recipients.is_none())
+                        .then_some(request_id.clone())
                 })
                 .collect::<Vec<_>>();
 
@@ -1676,6 +1847,7 @@ mod tests {
         let (dynamic_tool_request_id, _dynamic_tool_waiter) = thread_outgoing
             .send_request(ServerRequestPayload::DynamicToolCall(
                 DynamicToolCallParams {
+                    cleanup_token: None,
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-0".to_string(),
@@ -1724,7 +1896,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_requests_for_thread_cancels_all_thread_requests() {
+    async fn turn_transition_preserves_dynamic_cleanup_but_cancels_other_requests() {
         let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(8);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,
@@ -1737,9 +1909,10 @@ mod tests {
             thread_id,
         );
 
-        let (_dynamic_tool_request_id, dynamic_tool_waiter) = thread_outgoing
-            .send_request(ServerRequestPayload::DynamicToolCall(
+        let (dynamic_tool_request_id, mut dynamic_tool_waiter) = thread_outgoing
+            .send_owner_request(ServerRequestPayload::DynamicToolCall(
                 DynamicToolCallParams {
+                    cleanup_token: None,
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-0".to_string(),
@@ -1767,15 +1940,33 @@ mod tests {
             .cancel_requests_for_thread(thread_id, Some(error.clone()))
             .await;
 
-        let dynamic_tool_result = timeout(Duration::from_secs(1), dynamic_tool_waiter)
-            .await
-            .expect("dynamic tool waiter should resolve")
-            .expect("dynamic tool waiter should receive a callback");
+        assert!(
+            timeout(Duration::from_millis(20), &mut dynamic_tool_waiter)
+                .await
+                .is_err()
+        );
+        // A malformed answer also leaves the callback recoverable.
+        outgoing
+            .notify_client_response(
+                ConnectionId(1),
+                dynamic_tool_request_id.clone(),
+                json!({"cleanupComplete": true}),
+            )
+            .await;
+        assert!(
+            timeout(Duration::from_millis(20), &mut dynamic_tool_waiter)
+                .await
+                .is_err()
+        );
+        let confirmed = json!({"contentItems":[],"success":false,"cleanupComplete":true});
+        outgoing
+            .notify_client_response(ConnectionId(1), dynamic_tool_request_id, confirmed.clone())
+            .await;
+        assert_eq!(dynamic_tool_waiter.await.unwrap(), Ok(confirmed));
         let user_input_result = timeout(Duration::from_secs(1), user_input_waiter)
             .await
             .expect("user input waiter should resolve")
             .expect("user input waiter should receive a callback");
-        assert_eq!(dynamic_tool_result, Err(error.clone()));
         assert_eq!(user_input_result, Err(error));
         assert!(
             outgoing
@@ -1783,5 +1974,173 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+    #[tokio::test]
+    async fn normal_dynamic_callbacks_keep_baseline_routing_and_cancellation() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let thread_id = ThreadId::new();
+        let scoped = ThreadScopedOutgoingMessageSender::new(
+            Arc::clone(&outgoing),
+            vec![ConnectionId(1), ConnectionId(2)],
+            thread_id,
+        );
+        // A namespace string alone cannot grant the strict host-owned lifecycle.
+        let (_, waiter) = scoped
+            .send_request(ServerRequestPayload::DynamicToolCall(
+                DynamicToolCallParams {
+                    cleanup_token: None,
+                    thread_id: thread_id.to_string(),
+                    turn_id: "normal-turn".into(),
+                    call_id: "normal-call".into(),
+                    namespace: Some("witnessops".into()),
+                    tool: "read_head".into(),
+                    arguments: json!({}),
+                },
+            ))
+            .await;
+        for _ in 0..2 {
+            let Some(OutgoingEnvelope::ToConnection {
+                message: OutgoingMessage::Request(ServerRequest::DynamicToolCall { params, .. }),
+                ..
+            }) = rx.recv().await
+            else {
+                panic!("normal callback routing");
+            };
+            assert!(params.cleanup_token.is_none());
+        }
+        assert_eq!(
+            outgoing.pending_requests_for_thread(thread_id).await.len(),
+            1
+        );
+        let error = internal_error("normal callback cancelled");
+        outgoing
+            .cancel_requests_for_thread(thread_id, Some(error.clone()))
+            .await;
+        assert_eq!(waiter.await.unwrap(), Err(error));
+    }
+
+    #[tokio::test]
+    async fn legacy_cleanup_without_original_runtime_never_records_a_receipt() {
+        for cleanup_complete in [false, true] {
+            let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+            let outgoing = Arc::new(OutgoingMessageSender::new(
+                tx,
+                codex_analytics::AnalyticsEventsClient::disabled(),
+            ));
+            let thread_id = ThreadId::new();
+            let scoped = ThreadScopedOutgoingMessageSender::new(
+                Arc::clone(&outgoing),
+                vec![ConnectionId(1)],
+                thread_id,
+            );
+            // The unit-only path can dispatch without a core runtime, but it
+            // must never manufacture the receipt that a real core delivery earns.
+            let (request_id, mut waiter) = scoped
+                .send_owner_request(ServerRequestPayload::DynamicToolCall(
+                    DynamicToolCallParams {
+                        cleanup_token: None,
+                        thread_id: thread_id.to_string(),
+                        turn_id: "turn".into(),
+                        call_id: "call".into(),
+                        namespace: Some("witnessops".into()),
+                        tool: "read_head".into(),
+                        arguments: json!({}),
+                    },
+                ))
+                .await;
+            let Some(OutgoingEnvelope::ToConnection {
+                message: OutgoingMessage::Request(ServerRequest::DynamicToolCall { params, .. }),
+                ..
+            }) = rx.recv().await
+            else {
+                panic!("expected an owner-scoped dynamic callback");
+            };
+            let identity = codex_app_server_protocol::DynamicToolCleanupIdentity {
+                thread_id: params.thread_id,
+                turn_id: params.turn_id,
+                call_id: params.call_id,
+                request_id: request_id.clone(),
+                capability: params.cleanup_token.expect("initial capability"),
+            };
+            let response = json!({
+                "contentItems":[],"success":false,"cleanupComplete":cleanup_complete
+            });
+            outgoing
+                .notify_client_response(ConnectionId(2), request_id.clone(), response.clone())
+                .await;
+            outgoing
+                .notify_client_response(
+                    ConnectionId(1),
+                    request_id.clone(),
+                    json!({"cleanupComplete":true}),
+                )
+                .await;
+            assert!(matches!(
+                waiter.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(
+                !outgoing
+                    .dynamic_tool_recovery
+                    .lookup(&identity)
+                    .await
+                    .unwrap()
+                    .acknowledged
+            );
+
+            outgoing
+                .notify_client_response(ConnectionId(1), request_id, response.clone())
+                .await;
+            assert_eq!(waiter.await.unwrap(), Ok(response));
+            assert!(
+                !outgoing
+                    .dynamic_tool_recovery
+                    .lookup(&identity)
+                    .await
+                    .unwrap()
+                    .acknowledged
+            );
+            assert!(matches!(
+                outgoing
+                    .dynamic_tool_recovery
+                    .pending_original(&identity)
+                    .await,
+                Err(crate::dynamic_tool_recovery::RecoveryError::OriginalThreadUnavailable)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_recovery_capability_is_never_broadcast_or_shared() {
+        for owners in [Vec::new(), vec![ConnectionId(1), ConnectionId(2)]] {
+            let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+            let outgoing = Arc::new(OutgoingMessageSender::new(
+                tx,
+                codex_analytics::AnalyticsEventsClient::disabled(),
+            ));
+            let thread_id = ThreadId::new();
+            let scoped = ThreadScopedOutgoingMessageSender::new(outgoing, owners, thread_id);
+            let (_, reply) = scoped
+                .send_owner_request(ServerRequestPayload::DynamicToolCall(
+                    DynamicToolCallParams {
+                        cleanup_token: None,
+                        thread_id: thread_id.to_string(),
+                        turn_id: "t".into(),
+                        call_id: "c".into(),
+                        namespace: Some("witnessops".into()),
+                        tool: "read_head".into(),
+                        arguments: json!({}),
+                    },
+                ))
+                .await;
+            let result = reply.await.unwrap().unwrap();
+            assert_eq!(result["success"], false);
+            assert_eq!(result["cleanupComplete"], true); // no dispatch, hence no external effects
+            assert!(rx.try_recv().is_err());
+        }
     }
 }

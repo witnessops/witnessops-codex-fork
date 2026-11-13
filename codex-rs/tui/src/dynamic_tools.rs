@@ -282,6 +282,7 @@ pub(crate) fn non_delegation_tool_specs() -> Vec<DynamicToolSpec> {
 
 pub(crate) fn failure_response(message: impl Into<String>) -> DynamicToolCallResponse {
     DynamicToolCallResponse {
+        cleanup_complete: false,
         content_items: vec![DynamicToolCallOutputContentItem::InputText {
             text: truncate(&message.into(), MAX_ERROR_CHARS),
         }],
@@ -316,6 +317,7 @@ pub(crate) async fn execute(
 fn success_response(value: Value) -> Result<DynamicToolCallResponse, String> {
     let text = response::serialize(value)?;
     Ok(DynamicToolCallResponse {
+        cleanup_complete: false,
         content_items: vec![DynamicToolCallOutputContentItem::InputText { text }],
         success: true,
     })

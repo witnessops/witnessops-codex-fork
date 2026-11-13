@@ -424,7 +424,7 @@ lazy_static = "1"
 libc = "0.2.182"
 # Keep SQLx's bundled SQLite on a version containing the WAL-reset corruption fix:
 # https://www.sqlite.org/wal.html#the_wal_reset_bug
-libsqlite3-sys = { version = "0.37", default-features = false }
+libsqlite3-sys = { version = "0.39", default-features = false }
 linkify = "0.11"
 log = "0.4"
 lru = "0.18.2"
@@ -670,6 +670,9 @@ inherits = "test"
 opt-level = 0
 
 [patch.crates-io]
+# Narrow compatibility bridges; provenance and removal criteria: ../third_party/README.md.
+rama-dns = { path = "../third_party/rama-dns" }
+sqlx-sqlite = { path = "../third_party/sqlx-sqlite" }
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
 crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }

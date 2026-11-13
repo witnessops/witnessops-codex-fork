@@ -20,6 +20,7 @@ const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "code
 
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
+    pub(crate) dynamic_tool_owner_mode: crate::DynamicToolOwnerMode,
     gateway_login_control: Arc<codex_login::GatewayLoginControl>,
     gateway_login_initialized: Arc<std::sync::OnceLock<()>>,
     outgoing: Arc<OutgoingMessageSender>,
@@ -40,6 +41,7 @@ impl InitializeRequestProcessor {
         user_verification: Arc<crate::user_verification::Service>,
     ) -> Self {
         Self {
+            dynamic_tool_owner_mode: crate::DynamicToolOwnerMode::Normal,
             gateway_login_control,
             gateway_login_initialized: Arc::new(std::sync::OnceLock::new()),
             outgoing,
@@ -213,6 +215,8 @@ impl InitializeRequestProcessor {
 
         let user_agent = get_codex_user_agent();
         let response = InitializeResponse {
+            sovereign_read_head: self.dynamic_tool_owner_mode
+                == crate::DynamicToolOwnerMode::SovereignReadHead,
             user_agent,
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "DynamicToolCleanupStatus": {
+      "enum": [
+        "running",
+        "cancelling",
+        "ownerDetached",
+        "acknowledged"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "status": {
+      "$ref": "#/definitions/DynamicToolCleanupStatus"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "DynamicToolCleanupReadResponse",
+  "type": "object"
+}
