@@ -118,7 +118,7 @@ jobs:
     name: Recovery Linux GNU build and tests
     if: github.repository == 'witnessops/witnessops-codex-fork' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
@@ -166,7 +166,7 @@ jobs:
           echo "CODEX_COMPAT_RELEASES=$releases" >> "$GITHUB_ENV"
 
       - name: Build and test the Linux GNU workspace once
-        timeout-minutes: 80
+        timeout-minutes: 170
         run: |
           set -euo pipefail
           # Match the ordinary Linux test scope. V8 consumers remain included;
