@@ -265,7 +265,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -276,7 +276,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -339,7 +339,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -6335,7 +6335,7 @@ dependencies = [
  "openssl-sys",
  "schannel",
  "socket2 0.6.3",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6350,7 +6350,7 @@ dependencies = [
  "openssl-sys",
  "pkg-config",
  "vcpkg",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6887,7 +6887,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7151,18 +7151,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869b0adbda23651a9c5c0c3d270aac9fcb52e8622a8f2b17e57802d7791962f2"
 
 [[package]]
-name = "enum-as-inner"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7244,7 +7232,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7396,7 +7384,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7896,7 +7884,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8947,23 +8935,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hickory-proto"
-version = "0.25.2"
+name = "hickory-net"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
+checksum = "084e7bd6a377435d568f652153e571b50970d7ccc1d1eeec0519f834632287e1"
 dependencies = [
  "async-trait",
  "cfg-if",
  "data-encoding",
- "enum-as-inner",
  "futures-channel",
  "futures-io",
  "futures-util",
+ "hickory-proto",
  "idna",
  "ipnet",
- "once_cell",
- "rand 0.9.3",
- "ring",
+ "jni",
+ "rand 0.10.1",
  "thiserror 2.0.18",
  "tinyvec",
  "tokio",
@@ -8972,21 +8959,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "hickory-resolver"
-version = "0.25.2"
+name = "hickory-proto"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc62a9a99b0bfb44d2ab95a7208ac952d31060efc16241c87eaf36406fecf87a"
+checksum = "7e2da0694c15b44c6f68a6b05e0233617008c54080e31d6eb848d858a9c5b38d"
+dependencies = [
+ "data-encoding",
+ "idna",
+ "ipnet",
+ "jni",
+ "once_cell",
+ "prefix-trie",
+ "rand 0.10.1",
+ "ring",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "hickory-resolver"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e4f9f4603319422d482738f3f6fe5aac03157fdbfed1cd85a3ff45adb09072f"
 dependencies = [
  "cfg-if",
  "futures-util",
+ "hickory-net",
  "hickory-proto",
  "ipconfig",
+ "ipnet",
+ "jni",
  "moka",
+ "ndk-context",
  "once_cell",
  "parking_lot",
- "rand 0.9.3",
+ "rand 0.10.1",
  "resolv-conf",
  "smallvec",
+ "system-configuration",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -9743,6 +9755,9 @@ name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "iri-string"
@@ -9762,7 +9777,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10125,9 +10140,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "b0e7f1cd558a82cc3af091ed13f0f03846f89851c60a10713ce5cfd484195494"
 dependencies = [
  "cc",
  "pkg-config",
@@ -10742,7 +10757,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -12005,6 +12020,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "prefix-trie"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf6e3177f0684016a5c209b00882e15f8bdd3f3bb48f0491df10cd102d0c6e7"
+dependencies = [
+ "either",
+ "ipnet",
+ "num-traits",
+]
+
+[[package]]
 name = "pretty_assertions"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12388,7 +12414,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12401,7 +12427,7 @@ dependencies = [
  "libc",
  "log",
  "socket2 0.5.10",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -12471,8 +12497,6 @@ dependencies = [
 [[package]]
 name = "rama-dns"
 version = "0.3.0-alpha.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e340fef2799277e204260b17af01bc23604712092eacd6defe40167f304baed8"
 dependencies = [
  "ahash",
  "hickory-resolver",
@@ -13701,7 +13725,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13714,7 +13738,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13773,7 +13797,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -14585,7 +14609,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -14850,8 +14874,6 @@ dependencies = [
 [[package]]
 name = "sqlx-sqlite"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi",
  "chrono",
@@ -15415,7 +15437,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -15471,7 +15493,7 @@ dependencies = [
  "parking_lot",
  "rustix 1.1.4",
  "signal-hook",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

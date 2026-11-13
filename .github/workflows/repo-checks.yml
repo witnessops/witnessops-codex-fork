@@ -76,3 +76,38 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  dns-sqlite-compatibility:
+    if: github.repository == 'witnessops/witnessops-codex-fork' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./codex-rs
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Test Hickory compatibility and malformed SVCB handling
+        run: cargo test --locked -p codex-network-proxy --test dns_compatibility
+
+      - name: Test SQLite runtime and persistence compatibility
+        run: cargo test --locked -p codex-state --lib sqlite
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

@@ -5,8 +5,8 @@
 //! orchestration and rollout scanning live in `codex-core`.
 
 const _: () = assert!(
-    libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
-    "bundled SQLite must include the WAL-reset corruption fix",
+    libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_054_000,
+    "bundled SQLite must include the WAL-reset and page-size mismatch fixes",
 );
 
 mod audit;
