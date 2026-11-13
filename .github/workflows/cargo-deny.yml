@@ -5,7 +5,8 @@ on:
 
 jobs:
   cargo-deny:
-    timeout-minutes: 15
+    # Leave time for the all-feature graph and final clean-worktree check.
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     defaults:
       run:
